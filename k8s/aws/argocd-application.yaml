@@ -1,4 +1,5 @@
-# Change repoURL to the actual remote before applying if different.
+# Replace repoURL with the actual Git remote before applying.
+# This placeholder is intentionally not a valid repository URL.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -7,8 +8,8 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/tusha/openvino-llm-poc.git
-    targetRevision: HEAD
+    repoURL: REPLACE_WITH_GIT_REPOSITORY_URL
+    targetRevision: codex/aws-eks-openvino-poc
     path: k8s/aws
     directory:
       recurse: false
