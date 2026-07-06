@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+k8s/gateway-secret.yaml
+k8s/gateway-baremetal-rendered.yaml
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
