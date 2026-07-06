@@ -110,4 +110,5 @@ if ($successfulRows.Count -gt 0) {
 }
 else {
     Write-Warning 'No successful runs; averages are unavailable.'
+    exit 1
 }
