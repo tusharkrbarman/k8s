@@ -20,3 +20,15 @@ spec:
     matchLabels:
       app: ovms-llm
       color: blue
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ovms-green-pdb
+  namespace: llm-inference
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ovms-llm
+      color: green

@@ -37,3 +37,23 @@ spec:
         target:
           type: Utilization
           averageUtilization: 75
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ovms-green-hpa
+  namespace: llm-inference
+spec:
+  minReplicas: 2
+  maxReplicas: 2
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: ovms-green
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 75

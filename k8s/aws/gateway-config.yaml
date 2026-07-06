@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-gateway-config
+  namespace: llm-inference
+data:
+  OVMS_URL: http://ovms-blue-service.llm-inference.svc.cluster.local:8000/v3/chat/completions
+  MODEL_NAME: OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov

@@ -71,7 +71,7 @@ spec:
               mountPath: /models
       containers:
         - name: ovms
-          image: openvino/model_server:latest
+          image: openvino/model_server:2026.2-py
           imagePullPolicy: IfNotPresent
           args:
             - --source_model

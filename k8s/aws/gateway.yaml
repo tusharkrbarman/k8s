@@ -32,9 +32,15 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: OVMS_URL
-              value: http://ovms-blue-service.llm-inference.svc.cluster.local:8000/v3/chat/completions
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-gateway-config
+                  key: OVMS_URL
             - name: MODEL_NAME
-              value: OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-gateway-config
+                  key: MODEL_NAME
             - name: API_KEY_FILE
               value: /mnt/secrets-store/api-key
             - name: REQUEST_TIMEOUT_SECONDS
