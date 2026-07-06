@@ -55,6 +55,7 @@ $MODEL_BUCKET = terraform output -raw model_bucket_name
 $GATEWAY_API_KEY_SECRET_ARN = terraform output -raw gateway_api_key_secret_arn
 $GATEWAY_SERVICE_ACCOUNT_ROLE_ARN = terraform output -raw gateway_service_account_role_arn
 $OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN = terraform output -raw ovms_model_reader_service_account_role_arn
+$INTERNAL_ALB_SECURITY_GROUP_ID = terraform output -raw internal_alb_security_group_id
 ```
 
 Configure `kubectl` from a host that can reach the private EKS endpoint.
@@ -111,6 +112,10 @@ Set-Content -NoNewline k8s/aws/ovms-blue.yaml $blueManifest
 $greenManifest = Get-Content -Raw k8s/aws/ovms-green.yaml
 $greenManifest = $greenManifest.Replace("REPLACE_WITH_MODEL_BUCKET_NAME", $MODEL_BUCKET)
 Set-Content -NoNewline k8s/aws/ovms-green.yaml $greenManifest
+
+$ingressManifest = Get-Content -Raw k8s/aws/gateway-ingress.yaml
+$ingressManifest = $ingressManifest.Replace("REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID", $INTERNAL_ALB_SECURITY_GROUP_ID)
+Set-Content -NoNewline k8s/aws/gateway-ingress.yaml $ingressManifest
 
 $argoApplication = Get-Content -Raw k8s/aws/argocd-application.yaml
 $argoApplication = $argoApplication.Replace("REPLACE_WITH_GIT_REPOSITORY_URL", $GIT_REPOSITORY_URL)

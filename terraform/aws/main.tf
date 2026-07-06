@@ -126,13 +126,6 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  cluster_addons = {
-    aws-ebs-csi-driver = {
-      addon_version            = var.ebs_csi_addon_version
-      service_account_role_arn = module.ebs_csi_irsa.iam_role_arn
-    }
-  }
-
   eks_managed_node_groups = {
     system_gateway = {
       name = "system-gateway"
@@ -165,6 +158,20 @@ module "eks" {
       }
     }
   }
+
+  tags = local.tags
+}
+
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name             = module.eks.cluster_name
+  addon_name               = "aws-ebs-csi-driver"
+  addon_version            = var.ebs_csi_addon_version
+  service_account_role_arn = module.ebs_csi_irsa.iam_role_arn
+
+  depends_on = [
+    module.eks,
+    module.ebs_csi_irsa,
+  ]
 
   tags = local.tags
 }
