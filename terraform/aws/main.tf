@@ -213,6 +213,104 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "models" {
   }
 }
 
+resource "aws_secretsmanager_secret" "gateway_api_key" {
+  name        = "/openvino-llm-poc/gateway/api-key"
+  description = "Gateway API key placeholder. Populate the secret value outside Terraform."
+
+  tags = local.tags
+}
+
+data "aws_iam_policy_document" "gateway_api_key_read" {
+  statement {
+    sid = "ReadGatewayApiKey"
+
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+
+    resources = [aws_secretsmanager_secret.gateway_api_key.arn]
+  }
+}
+
+resource "aws_iam_policy" "gateway_api_key_read" {
+  name        = "${var.cluster_name}-gateway-api-key-read"
+  description = "Allow the gateway service account to read its API key secret."
+  policy      = data.aws_iam_policy_document.gateway_api_key_read.json
+
+  tags = local.tags
+}
+
+module "gateway_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.0"
+
+  role_name = "${var.cluster_name}-llm-gateway"
+
+  role_policy_arns = {
+    gateway_api_key_read = aws_iam_policy.gateway_api_key_read.arn
+  }
+
+  oidc_providers = {
+    this = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["llm-inference:llm-gateway"]
+    }
+  }
+
+  tags = local.tags
+}
+
+data "aws_iam_policy_document" "model_artifact_read" {
+  statement {
+    sid = "ListModelBucket"
+
+    actions = [
+      "s3:ListBucket",
+    ]
+
+    resources = [aws_s3_bucket.models.arn]
+  }
+
+  statement {
+    sid = "ReadModelArtifacts"
+
+    actions = [
+      "s3:GetObject",
+    ]
+
+    resources = ["${aws_s3_bucket.models.arn}/*"]
+  }
+}
+
+resource "aws_iam_policy" "model_artifact_read" {
+  name        = "${var.cluster_name}-model-artifact-read"
+  description = "Allow the OVMS model reader service account to read approved model artifacts."
+  policy      = data.aws_iam_policy_document.model_artifact_read.json
+
+  tags = local.tags
+}
+
+module "ovms_model_reader_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.0"
+
+  role_name = "${var.cluster_name}-ovms-model-reader"
+
+  role_policy_arns = {
+    model_artifact_read = aws_iam_policy.model_artifact_read.arn
+  }
+
+  oidc_providers = {
+    this = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["llm-inference:ovms-model-reader"]
+    }
+  }
+
+  tags = local.tags
+}
+
 resource "aws_security_group" "internal_alb" {
   name        = "${var.cluster_name}-internal-alb"
   description = "Allow trusted private HTTP traffic to the internal gateway ALB."
