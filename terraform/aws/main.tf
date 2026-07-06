@@ -118,7 +118,7 @@ module "eks" {
   cluster_version = "1.31"
 
   cluster_endpoint_private_access = true
-  cluster_endpoint_public_access  = true
+  cluster_endpoint_public_access  = false
 
   enable_cluster_creator_admin_permissions = true
   enable_irsa                              = true
@@ -128,7 +128,7 @@ module "eks" {
 
   cluster_addons = {
     aws-ebs-csi-driver = {
-      most_recent              = true
+      addon_version            = var.ebs_csi_addon_version
       service_account_role_arn = module.ebs_csi_irsa.iam_role_arn
     }
   }
@@ -423,6 +423,7 @@ resource "helm_release" "aws_load_balancer_controller" {
   name       = "aws-load-balancer-controller"
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
+  version    = var.aws_load_balancer_controller_chart_version
   namespace  = "kube-system"
 
   set {
@@ -457,11 +458,12 @@ resource "helm_release" "secrets_store_csi_driver" {
   name       = "secrets-store-csi-driver"
   repository = "https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts"
   chart      = "secrets-store-csi-driver"
+  version    = var.secrets_store_csi_driver_chart_version
   namespace  = "kube-system"
 
   set {
     name  = "syncSecret.enabled"
-    value = "true"
+    value = "false"
   }
 
   set {
@@ -476,6 +478,7 @@ resource "helm_release" "aws_secrets_manager_csi_driver_provider" {
   name       = "aws-secrets-manager-csi-driver-provider"
   repository = "https://aws.github.io/secrets-store-csi-driver-provider-aws"
   chart      = "secrets-store-csi-driver-provider-aws"
+  version    = var.aws_secrets_provider_chart_version
   namespace  = "kube-system"
 
   depends_on = [helm_release.secrets_store_csi_driver]
@@ -485,6 +488,7 @@ resource "helm_release" "argo_cd" {
   name       = "argo-cd"
   repository = "https://argoproj.github.io/argo-helm"
   chart      = "argo-cd"
+  version    = var.argo_cd_chart_version
   namespace  = kubernetes_namespace.argocd.metadata[0].name
 
   depends_on = [kubernetes_namespace.argocd]
