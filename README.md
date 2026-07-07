@@ -1,91 +1,139 @@
-# Kubernetes OpenVINO LLM Inference Platform
+# AWS EKS OpenVINO LLM Inference POC
 
-This project deploys an OpenVINO Model Server LLM endpoint on Kubernetes and adds a small API gateway in front of it. The final target is an Intel private-network, bare-metal, GPU-only inference platform.
+This repository contains a production-shaped proof of concept for serving an
+OpenVINO LLM endpoint on Kubernetes using AWS EKS.
 
-- Kubernetes schedules the inference server onto Intel GPU worker nodes.
-- OpenVINO Model Server serves an optimized open-source LLM.
-- A PersistentVolumeClaim caches model files across pod restarts.
-- A FastAPI gateway hides the raw OVMS endpoint and adds a stable user-facing API.
-- Smoke and stability tests validate the gateway and GPU inference route.
+The current implementation is private-only and AWS-based.
+
+## What This Builds
+
+- A private EKS cluster running in private subnets.
+- Intel M7i managed node groups for OpenVINO CPU inference.
+- OpenVINO Model Server running blue and green StatefulSets.
+- A FastAPI gateway in front of OVMS.
+- An internal AWS ALB for private user access.
+- AWS Secrets Manager integration through Secrets Store CSI Driver.
+- S3 model storage with EBS-backed per-pod model caches.
+- Argo CD GitOps sync for Kubernetes manifests.
+- HPA and PodDisruptionBudget resources for a production-shaped deployment.
+- Smoke, benchmark, and failure-demo scripts.
+
+Strict scope note: this branch validates the AWS EKS architecture and Intel CPU
+inference path. It does not claim Intel GPU or NPU validation.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    U["User<br/>Intel private network"] --> NP["Gateway node<br/>private IP:30090"]
-    NP --> G["FastAPI Gateway<br/>2 pods"]
-    G --> SVC["ClusterIP Service<br/>ovms-llm-gpu:8000"]
-    SVC --> OVMS["OVMS GPU pods<br/>target: GPU"]
-    OVMS --> PVC["PVCs<br/>model caches"]
-    OVMS --> GPU["Intel GPU workers"]
+flowchart TB
+    User["Private user or app<br/>inside corporate/VPC network"]
+    ALB["Internal AWS ALB<br/>private only"]
+    GatewaySvc["Kubernetes Service<br/>llm-gateway"]
+    GatewayPods["FastAPI Gateway Deployment<br/>API key check, request forwarding"]
+    SecretCSI["Secrets Store CSI Driver<br/>AWS provider"]
+    SecretsManager["AWS Secrets Manager<br/>gateway API key"]
+    ConfigMap["ConfigMap<br/>active OVMS target"]
+    BlueSvc["ovms-blue-service<br/>ClusterIP"]
+    GreenSvc["ovms-green-service<br/>ClusterIP"]
+    BlueOVMS["OVMS Blue StatefulSet<br/>OpenVINO model server"]
+    GreenOVMS["OVMS Green StatefulSet<br/>OpenVINO model server"]
+    EBS["EBS volumes<br/>model cache per pod"]
+    S3["S3 bucket<br/>OpenVINO model artifacts"]
+    ECR["ECR<br/>gateway image"]
+    Argo["Argo CD<br/>syncs k8s/aws"]
+    Git["Git repository<br/>this branch"]
+    Terraform["Terraform<br/>terraform/aws"]
+    AWSInfra["AWS foundation<br/>VPC, EKS, IAM, ALB, S3, ECR"]
 
-    subgraph K8S["Kubernetes cluster"]
-        G
-        SVC
-        OVMS
-        PVC
-        GPU
-    end
+    User --> ALB --> GatewaySvc --> GatewayPods
+    GatewayPods --> ConfigMap
+    GatewayPods --> SecretCSI --> SecretsManager
+    ConfigMap --> BlueSvc
+    ConfigMap -. "promotion switch" .-> GreenSvc
+    BlueSvc --> BlueOVMS
+    GreenSvc --> GreenOVMS
+    BlueOVMS --> EBS
+    GreenOVMS --> EBS
+    BlueOVMS --> S3
+    GreenOVMS --> S3
+    GatewayPods --> ECR
+    Git --> Argo --> GatewayPods
+    Git --> Argo --> BlueOVMS
+    Git --> Argo --> GreenOVMS
+    Terraform --> AWSInfra
 ```
 
-## Project Versions
+## Repository Layout
 
-| Version | Purpose | Status |
-| --- | --- | --- |
-| v1 | FastAPI gateway + OVMS service pattern | Implemented |
-| v2 | Registry + private NodePort exposure | Implemented |
-| v3 | Intel bare-metal GPU-only inference | Final target |
+| Path | Purpose |
+| --- | --- |
+| `terraform/aws` | AWS foundation: VPC, private EKS, node groups, IAM, ECR, S3, Secrets Manager, controllers, and outputs. |
+| `k8s/aws` | Kubernetes application manifests synced by Argo CD. |
+| `gateway/app/main.py` | FastAPI gateway that validates the API key and forwards chat requests to OVMS. |
+| `gateway/Dockerfile` | Container build for the gateway image. |
+| `scripts/aws-smoke-test.ps1` | Basic gateway health and chat smoke test. |
+| `scripts/aws-benchmark.ps1` | Simple repeated-request benchmark. |
+| `scripts/aws-failure-demo.sh` | Deletes one OVMS pod and waits for Kubernetes recovery. |
+| `docs/aws-eks-openvino-llm-poc.md` | Full deployment runbook and operating notes. |
 
-## AWS EKS Production-Shaped POC
+## Main Data Flow
 
-The AWS implementation runbook is in [docs/aws-eks-openvino-llm-poc.md](docs/aws-eks-openvino-llm-poc.md). It covers an EKS deployment with Intel M7i CPU inference nodes, OpenVINO Model Server, the FastAPI gateway behind an internal ALB, Secrets Manager CSI, S3 model storage with EBS-backed pod caches, Argo CD GitOps, HPA, and blue-green promotion.
+1. A private client calls the internal ALB.
+2. The ALB routes traffic to the gateway service.
+3. The gateway validates the API key mounted from AWS Secrets Manager.
+4. The gateway forwards chat requests to the active OVMS service.
+5. OVMS serves the OpenVINO model from its local EBS cache.
+6. Model artifacts are originally loaded from S3 into the pod cache.
+7. Blue-green promotion is done by changing the gateway `OVMS_URL` ConfigMap.
 
-## Apply Order
+## Deployment Flow
 
-Run these from the Intel private-network Kubernetes control-plane/admin machine:
+1. Create AWS infrastructure with Terraform from `terraform/aws`.
+2. Build and push the gateway image to ECR.
+3. Replace manifest placeholders in `k8s/aws`.
+4. Add the gateway API key value to AWS Secrets Manager.
+5. Upload approved OpenVINO model artifacts to S3.
+6. Apply the Argo CD Application.
+7. Run smoke and benchmark scripts from a network path that can reach the internal ALB.
 
-Create the gateway API key secret first:
+The detailed command-by-command runbook is here:
 
-```powershell
-.\scripts\create-gateway-secret.ps1 -ApiKey "<GATEWAY_API_KEY>"
+[docs/aws-eks-openvino-llm-poc.md](docs/aws-eks-openvino-llm-poc.md)
+
+## Important Placeholders
+
+The manifests intentionally include placeholders until Terraform and image
+builds produce real values:
+
+- `REPLACE_WITH_GATEWAY_ECR_IMAGE`
+- `REPLACE_WITH_GATEWAY_SERVICE_ACCOUNT_ROLE_ARN`
+- `REPLACE_WITH_OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN`
+- `REPLACE_WITH_MODEL_BUCKET_NAME`
+- `REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID`
+- `REPLACE_WITH_GIT_REPOSITORY_URL`
+
+Do not apply the manifests before replacing these values.
+
+## Validation
+
+Local validation currently covers:
+
+- FastAPI gateway unit tests.
+- YAML parse checks for Kubernetes manifests.
+- PowerShell script parser checks.
+- Git whitespace checks.
+
+Live validation still requires a real AWS account and a reachable private EKS
+cluster. Terraform, ALB provisioning, IRSA, CSI mounts, S3 model sync, EBS
+volumes, HPA behavior, and OVMS readiness cannot be fully proven locally.
+
+## Current Branch
+
+The active development branch is:
+
+```text
+codex/aws-eks-openvino-poc
 ```
 
-Render the gateway manifest with your internal-registry image:
+The branch has been pushed to:
 
-```powershell
-.\scripts\render-gateway-image.ps1 -Image "registry.internal.intel.com/YOUR_TEAM/llm-gateway:0.1.0"
-```
-
-```bash
-sudo kubectl apply -f k8s/gateway-secret.yaml
-sudo kubectl apply -f k8s/ovms-llm-gpu-baremetal.yaml
-sudo kubectl apply -f k8s/gateway-baremetal-rendered.yaml
-sudo kubectl apply -f k8s/hpa-baremetal.yaml
-```
-
-Check health:
-
-```bash
-sudo kubectl get pods -o wide
-sudo kubectl get svc
-sudo kubectl get endpoints ovms-llm-gpu-service
-```
-
-Gateway smoke test:
-
-```bash
-curl -X POST http://<GATEWAY_NODE_PRIVATE_IP>:30090/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <GATEWAY_API_KEY>" \
-  -d '{"message":"Say hello in one short sentence.","max_tokens":16}'
-```
-
-## Strict Demo Framing
-
-This final version is intentionally GPU-only for inference:
-
-- no CPU fallback model service
-- no NPU canary path
-- gateway is the only exposed service
-- OVMS runs on Intel GPU workers only
-- no LoadBalancer, MetalLB, or Ingress for this POC
+[github.com/tusharkrbarman/k8s/tree/codex/aws-eks-openvino-poc](https://github.com/tusharkrbarman/k8s/tree/codex/aws-eks-openvino-poc)
