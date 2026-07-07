@@ -115,7 +115,7 @@ module "eks" {
   version = "~> 20.0"
 
   cluster_name    = var.cluster_name
-  cluster_version = "1.31"
+  cluster_version = "1.36"
 
   cluster_endpoint_private_access = true
   cluster_endpoint_public_access  = false
@@ -489,6 +489,16 @@ resource "helm_release" "aws_secrets_manager_csi_driver_provider" {
   namespace  = "kube-system"
 
   depends_on = [helm_release.secrets_store_csi_driver]
+}
+
+resource "helm_release" "metrics_server" {
+  name       = "metrics-server"
+  repository = "https://kubernetes-sigs.github.io/metrics-server/"
+  chart      = "metrics-server"
+  version    = var.metrics_server_chart_version
+  namespace  = "kube-system"
+
+  depends_on = [module.eks]
 }
 
 resource "helm_release" "argo_cd" {

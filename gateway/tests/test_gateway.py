@@ -100,3 +100,51 @@ def test_chat_requires_configured_key(monkeypatch, tmp_path):
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Gateway API key is not configured"
+
+
+@respx.mock
+def test_ready_accepts_file_api_key_and_available_ovms(monkeypatch, tmp_path):
+    client = load_app(monkeypatch, tmp_path, api_key_file="file-secret\n")
+    respx.get("http://ovms.test/v1/config").mock(
+        return_value=Response(200, json={"test-model": {"model_version_status": []}})
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "api_key_configured": True,
+        "ovms_ready": True,
+        "ovms_config_url": "http://ovms.test/v1/config",
+    }
+
+
+def test_ready_rejects_missing_api_key(monkeypatch, tmp_path):
+    client = load_app(monkeypatch, tmp_path)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "status": "not_ready",
+        "api_key_configured": False,
+        "ovms_ready": False,
+        "ovms_config_url": "http://ovms.test/v1/config",
+    }
+
+
+@respx.mock
+def test_ready_rejects_unavailable_ovms(monkeypatch, tmp_path):
+    client = load_app(monkeypatch, tmp_path, api_key="env-secret")
+    respx.get("http://ovms.test/v1/config").mock(return_value=Response(503))
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "status": "not_ready",
+        "api_key_configured": True,
+        "ovms_ready": False,
+        "ovms_config_url": "http://ovms.test/v1/config",
+    }

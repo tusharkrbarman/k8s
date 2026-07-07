@@ -7,15 +7,17 @@ The current implementation is private-only and AWS-based.
 
 ## What This Builds
 
-- A private EKS cluster running in private subnets.
+- A private EKS `1.36` cluster running in private subnets.
 - Intel M7i managed node groups for OpenVINO CPU inference.
-- OpenVINO Model Server running blue and green StatefulSets.
+- OpenVINO Model Server running a low-cost blue active StatefulSet and a green
+  standby StatefulSet scaled to zero by default.
 - A FastAPI gateway in front of OVMS.
 - An internal AWS ALB for private user access.
 - AWS Secrets Manager integration through Secrets Store CSI Driver.
 - S3 model storage with EBS-backed per-pod model caches.
 - Argo CD GitOps sync for Kubernetes manifests.
-- HPA and PodDisruptionBudget resources for a production-shaped deployment.
+- Metrics Server, gateway HPA, and PodDisruptionBudget resources for a
+  production-shaped deployment.
 - Smoke, benchmark, and failure-demo scripts.
 
 Strict scope note: this branch validates the AWS EKS architecture and Intel CPU
@@ -35,7 +37,7 @@ flowchart TB
     BlueSvc["ovms-blue-service<br/>ClusterIP"]
     GreenSvc["ovms-green-service<br/>ClusterIP"]
     BlueOVMS["OVMS Blue StatefulSet<br/>OpenVINO model server"]
-    GreenOVMS["OVMS Green StatefulSet<br/>OpenVINO model server"]
+    GreenOVMS["OVMS Green StatefulSet<br/>standby, replicas 0"]
     EBS["EBS volumes<br/>model cache per pod"]
     S3["S3 bucket<br/>OpenVINO model artifacts"]
     ECR["ECR<br/>gateway image"]
@@ -87,13 +89,15 @@ flowchart TB
 
 ## Deployment Flow
 
-1. Create AWS infrastructure with Terraform from `terraform/aws`.
-2. Build and push the gateway image to ECR.
-3. Replace manifest placeholders in `k8s/aws`.
-4. Add the gateway API key value to AWS Secrets Manager.
-5. Upload approved OpenVINO model artifacts to S3.
-6. Apply the Argo CD Application.
-7. Run smoke and benchmark scripts from a network path that can reach the internal ALB.
+1. Connect to the Intel DMZ VPN or another private route that can reach the EKS
+   private API endpoint and internal ALB.
+2. Create AWS infrastructure with Terraform from `terraform/aws`.
+3. Build and push the gateway image to ECR.
+4. Replace manifest placeholders in `k8s/aws`.
+5. Add the gateway API key value to AWS Secrets Manager.
+6. Upload approved OpenVINO model artifacts to S3.
+7. Apply the Argo CD Application.
+8. Run smoke and benchmark scripts from the same private network path.
 
 The detailed command-by-command runbook is here:
 
@@ -117,14 +121,20 @@ Do not apply the manifests before replacing these values.
 
 Local validation currently covers:
 
-- FastAPI gateway unit tests.
+- FastAPI gateway unit tests from the repository root:
+
+  ```powershell
+  python -m pytest gateway/tests
+  ```
+
 - YAML parse checks for Kubernetes manifests.
 - PowerShell script parser checks.
 - Git whitespace checks.
 
 Live validation still requires a real AWS account and a reachable private EKS
 cluster. Terraform, ALB provisioning, IRSA, CSI mounts, S3 model sync, EBS
-volumes, HPA behavior, and OVMS readiness cannot be fully proven locally.
+volumes, gateway HPA behavior, and OVMS readiness cannot be fully proven
+locally.
 
 ## Current Branch
 

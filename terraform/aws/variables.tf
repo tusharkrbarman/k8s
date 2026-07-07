@@ -69,6 +69,12 @@ variable "aws_secrets_provider_chart_version" {
   default     = "1.0.1"
 }
 
+variable "metrics_server_chart_version" {
+  description = "Pinned metrics-server Helm chart version."
+  type        = string
+  default     = "3.13.1"
+}
+
 variable "argo_cd_chart_version" {
   description = "Pinned Argo CD Helm chart version."
   type        = string

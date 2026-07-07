@@ -33,7 +33,7 @@ metadata:
     app: ovms-llm
     color: blue
 spec:
-  replicas: 2
+  replicas: 1
   serviceName: ovms-blue-headless
   selector:
     matchLabels:

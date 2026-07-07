@@ -8,7 +8,7 @@ metadata:
     alb.ingress.kubernetes.io/scheme: internal
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
-    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
     alb.ingress.kubernetes.io/security-groups: REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID
     alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
 spec:

@@ -1,13 +1,13 @@
 # AWS EKS OpenVINO LLM POC Runbook
 
-This runbook deploys the production-shaped AWS proof of concept for OpenVINO LLM inference on EKS. It is private-only, CPU-based, and GitOps-managed after bootstrap.
+This runbook deploys the production-shaped AWS proof of concept for OpenVINO LLM inference on EKS. It is private-only, CPU-based, low-cost by default, and GitOps-managed after bootstrap.
 
 ## Architecture Summary
 
-- Terraform lives in `terraform/aws` and creates the AWS foundation: VPC, private EKS cluster, Intel M7i managed node groups, ECR, S3, IAM roles for service accounts, Secrets Manager, EBS CSI, AWS Load Balancer Controller, Secrets Store CSI, and Argo CD.
+- Terraform lives in `terraform/aws` and creates the AWS foundation: VPC, private EKS 1.36 cluster, Intel M7i managed node groups, ECR, S3, IAM roles for service accounts, Secrets Manager, EBS CSI, AWS Load Balancer Controller, Secrets Store CSI, Metrics Server, and Argo CD.
 - Application manifests live in `k8s/aws` and are intended to be synced by Argo CD.
-- The gateway is a FastAPI service running behind an internal ALB. It reads the API key from AWS Secrets Manager through the Secrets Store CSI driver.
-- OpenVINO Model Server runs as blue and green StatefulSets on Intel M7i CPU inference nodes. The OVMS image is digest-pinned in the manifests.
+- The gateway is a FastAPI service running behind an internal ALB. It reads the API key from AWS Secrets Manager through the Secrets Store CSI driver and exposes `/ready` for ALB/readiness checks.
+- OpenVINO Model Server runs blue and green StatefulSets on Intel M7i CPU inference nodes. Blue is active with one replica by default; green is standby with zero replicas by default. The OVMS image is digest-pinned in the manifests.
 - Model artifacts are copied from S3 into each OVMS pod's EBS-backed model cache by an init container.
 - Active traffic target is controlled by `k8s/aws/gateway-config.yaml` through `OVMS_URL`.
 - Access is private-only through an internal ALB; there is no public EKS endpoint and no public gateway.
@@ -22,13 +22,13 @@ Strict scope note: this AWS design validates Intel CPU inference with OpenVINO o
 - Docker installed and able to build Linux images.
 - `kubectl` installed.
 - Git remote for this repository reachable by Argo CD.
-- Network path to the private EKS API endpoint after cluster creation, such as VPN, Direct Connect, bastion, or a runner inside the VPC.
+- Intel DMZ VPN access or another private network path to the private EKS API endpoint and internal ALB, such as Direct Connect, bastion, or a runner inside the VPC.
 
-Important: Terraform sets `cluster_endpoint_private_access = true` and `cluster_endpoint_public_access = false`. After the EKS cluster exists, Terraform and Helm operations that talk to Kubernetes must run from a network path that can reach the private endpoint.
+Important: Terraform sets `cluster_endpoint_private_access = true` and `cluster_endpoint_public_access = false`. Run Terraform, `kubectl`, Helm-backed Terraform resources, smoke tests, and benchmark tests from an Intel DMZ VPN-connected environment or another network path that can reach the private endpoint and internal ALB.
 
 ## Bootstrap AWS Infrastructure
 
-Run Terraform from `terraform/aws`.
+Run Terraform from `terraform/aws` while connected to the Intel DMZ VPN or another private route that can reach the EKS private endpoint after cluster creation.
 
 ```powershell
 cd terraform/aws
@@ -172,6 +172,12 @@ kubectl get pods -n llm-inference -o wide
 kubectl get ingress -n llm-inference llm-gateway-internal
 ```
 
+For the low-cost demo default, expect one blue OVMS pod and zero green OVMS pods:
+
+```powershell
+kubectl get statefulset -n llm-inference ovms-blue ovms-green
+```
+
 Wait for the ALB address to appear:
 
 ```powershell
@@ -210,9 +216,12 @@ Green target:
 OVMS_URL: http://ovms-green-service.llm-inference.svc.cluster.local:8000/v3/chat/completions
 ```
 
-To promote green:
+To promote green, first scale green up and wait for it to become ready:
 
 ```powershell
+kubectl scale statefulset/ovms-green -n llm-inference --replicas=1
+kubectl rollout status statefulset/ovms-green -n llm-inference --timeout=10m
+
 $gatewayConfig = Get-Content -Raw k8s/aws/gateway-config.yaml
 $gatewayConfig = $gatewayConfig.Replace("http://ovms-blue-service.llm-inference.svc.cluster.local:8000/v3/chat/completions", "http://ovms-green-service.llm-inference.svc.cluster.local:8000/v3/chat/completions")
 Set-Content -NoNewline k8s/aws/gateway-config.yaml $gatewayConfig
@@ -235,7 +244,8 @@ The gateway reads `OVMS_URL` from a ConfigMap as an environment variable, so res
 
 ## Known Local Validation Gaps
 
+- Gateway unit tests run from the repository root with `python -m pytest gateway/tests`.
 - A real AWS account, Terraform CLI, and EKS cluster are required to validate infrastructure creation.
-- The local environment cannot prove the private EKS endpoint, Helm releases, IRSA, CSI mounts, ALB provisioning, S3 model sync, EBS volumes, HPA behavior, or OVMS readiness.
+- The local environment cannot prove the private EKS endpoint, Helm releases, IRSA, CSI mounts, ALB provisioning, S3 model sync, EBS volumes, gateway HPA behavior, or OVMS readiness.
 - `kubectl --dry-run` is not meaningful for this stack without a live cluster and installed CRDs such as Argo CD `Application` and Secrets Store CSI `SecretProviderClass`.
 - Local documentation validation is limited to static checks such as `git diff --check`.
