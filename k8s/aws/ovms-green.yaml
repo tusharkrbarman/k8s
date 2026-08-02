@@ -66,10 +66,10 @@ spec:
           image: openvino/model_server@sha256:19cda71ccab73930d0a65e48ea27c3464ce2c00cec326f0831457ae525831321
           imagePullPolicy: IfNotPresent
           args:
-            - --source_model
+            - --model_path
+            - /models/OpenVINO/Phi-3.5-mini-instruct-int4-ov
+            - --model_name
             - OpenVINO/Phi-3.5-mini-instruct-int4-ov
-            - --model_repository_path
-            - /models
             - --task
             - text_generation
             - --rest_port

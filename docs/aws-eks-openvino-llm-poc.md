@@ -226,10 +226,15 @@ kubectl apply -f k8s/aws/pdb.yaml
 Watch the model copy and startup rather than repeatedly restarting it:
 
 ```powershell
-kubectl get pods,pvc -n llm-inference -w
+kubectl get pods -n llm-inference -w
+kubectl get pvc -n llm-inference
 kubectl logs -n llm-inference statefulset/ovms-blue -c sync-model -f
 kubectl logs -n llm-inference statefulset/ovms-blue -c ovms -f
 ```
+
+The init container copies the model from S3 to the EBS-backed cache. The OVMS
+container then serves that local directory with `--model_path`; do not replace
+it with `--source_model`, which selects the Hugging Face pull workflow.
 
 Expected steady state:
 
