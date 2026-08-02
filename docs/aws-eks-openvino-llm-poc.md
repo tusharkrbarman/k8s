@@ -1,251 +1,293 @@
 # AWS EKS OpenVINO LLM POC Runbook
 
-This runbook deploys the production-shaped AWS proof of concept for OpenVINO LLM inference on EKS. It is private-only, CPU-based, low-cost by default, and GitOps-managed after bootstrap.
+This runbook continues from the console-built AWS environment and deploys the
+first working demo directly with `kubectl`. It does not push local changes or
+enable Argo CD yet.
 
-## Architecture Summary
+## 1. Known Deployment Profile
 
-- Terraform lives in `terraform/aws` and creates the AWS foundation: VPC, private EKS 1.36 cluster, Intel M7i managed node groups, ECR, S3, IAM roles for service accounts, Secrets Manager, EBS CSI, AWS Load Balancer Controller, Secrets Store CSI, Metrics Server, and Argo CD.
-- Application manifests live in `k8s/aws` and are intended to be synced by Argo CD.
-- The gateway is a FastAPI service running behind an internal ALB. It reads the API key from AWS Secrets Manager through the Secrets Store CSI driver and exposes `/ready` for ALB/readiness checks.
-- OpenVINO Model Server runs blue and green StatefulSets on Intel M7i CPU inference nodes. Blue is active with one replica by default; green is standby with zero replicas by default. The OVMS image is digest-pinned in the manifests.
-- Model artifacts are copied from S3 into each OVMS pod's EBS-backed model cache by an init container.
-- Active traffic target is controlled by `k8s/aws/gateway-config.yaml` through `OVMS_URL`.
-- Access is private-only through an internal ALB; there is no public EKS endpoint and no public gateway.
+| Item | Current value |
+| --- | --- |
+| Region | `ap-south-1` |
+| Cluster | `openvino-llm-poc` |
+| Kubernetes | EKS `1.36` |
+| Worker | one `m7i.xlarge` managed node |
+| Node labels | `nodepool=m7i-inference`, `inference=openvino-cpu`, `hardware=intel-cpu` |
+| Namespace | `llm-inference` |
+| Model | `OpenVINO/Phi-3.5-mini-instruct-int4-ov` |
+| Model bucket | `openvino-llm-models-654158184275-ap-south-1` |
+| Storage | encrypted `gp3`, provisioner `ebs.csi.aws.com` |
+| Identity | EKS Pod Identity |
+| Egress | temporary public NAT Gateway |
+| Target ingress | internal ALB |
 
-Strict scope note: this AWS design validates Intel CPU inference with OpenVINO on M7i instances. It does not claim Intel GPU or NPU validation.
+Blue OVMS has one replica. Green has zero. The gateway has one replica. This is
+a low-cost functional demo, not a highly available deployment.
 
-## Prerequisites
+The current learning cluster temporarily exposes the EKS API publicly as well
+as privately. The target state is private API access from the Intel DMZ VPN or
+another VPC-connected environment, plus an internal ALB for application traffic.
 
-- AWS account access with permissions to create VPC, EKS, IAM, ECR, S3, Secrets Manager, KMS, EBS, ALB, and related resources.
-- AWS CLI authenticated to the target account.
-- Terraform CLI installed.
-- Docker installed and able to build Linux images.
-- `kubectl` installed.
-- Git remote for this repository reachable by Argo CD.
-- Intel DMZ VPN access or another private network path to the private EKS API endpoint and internal ALB, such as Direct Connect, bastion, or a runner inside the VPC.
+## 2. Verify The Cluster Foundation
 
-Important: Terraform sets `cluster_endpoint_private_access = true` and `cluster_endpoint_public_access = false`. Run Terraform, `kubectl`, Helm-backed Terraform resources, smoke tests, and benchmark tests from an Intel DMZ VPN-connected environment or another network path that can reach the private endpoint and internal ALB.
-
-## Bootstrap AWS Infrastructure
-
-Run Terraform from `terraform/aws` while connected to the Intel DMZ VPN or another private route that can reach the EKS private endpoint after cluster creation.
+Run these commands from the Windows terminal that already has AWS and
+Kubernetes access:
 
 ```powershell
-cd terraform/aws
+$REGION = "ap-south-1"
+$CLUSTER = "openvino-llm-poc"
 
-$AWS_REGION = "us-east-1"
-$MODEL_BUCKET = "openvino-llm-models-tusha-dev"
-
-terraform init
-terraform plan `
-  -var "region=$AWS_REGION" `
-  -var "model_bucket_name=$MODEL_BUCKET"
-
-terraform apply `
-  -var "region=$AWS_REGION" `
-  -var "model_bucket_name=$MODEL_BUCKET"
+aws eks update-kubeconfig --name $CLUSTER --region $REGION
+kubectl get nodes -L nodepool,inference,hardware
+kubectl get pods -n kube-system -o wide
+kubectl get storageclass
 ```
 
-Capture the outputs used by later steps.
+Do not deploy the application unless:
+
+- the worker reports `Ready`;
+- CoreDNS, Metrics Server, VPC CNI, EKS Pod Identity agent, and EBS CSI pods are
+  `Running`;
+- the Secrets Store CSI driver and AWS provider pods are `Running`;
+- `gp3` exists and uses `ebs.csi.aws.com`;
+- the node has `nodepool=m7i-inference` and `inference=openvino-cpu`.
+
+The private subnets currently use NAT for bootstrap. They also use VPC endpoints
+for core AWS APIs. The two endpoints that were required during node and EBS CSI
+bootstrap were `com.amazonaws.ap-south-1.ec2` and
+`com.amazonaws.ap-south-1.eks-auth`.
+
+The AWS secrets provider does not replace the upstream Secrets Store CSI
+driver. Install both while the temporary NAT path is available:
 
 ```powershell
-$CLUSTER_NAME = terraform output -raw cluster_name
-$GATEWAY_ECR_REPOSITORY_URL = terraform output -raw gateway_ecr_repository_url
-$MODEL_BUCKET = terraform output -raw model_bucket_name
-$GATEWAY_API_KEY_SECRET_ARN = terraform output -raw gateway_api_key_secret_arn
-$GATEWAY_SERVICE_ACCOUNT_ROLE_ARN = terraform output -raw gateway_service_account_role_arn
-$OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN = terraform output -raw ovms_model_reader_service_account_role_arn
-$INTERNAL_ALB_SECURITY_GROUP_ID = terraform output -raw internal_alb_security_group_id
+helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
+helm repo add aws-secrets-manager https://aws.github.io/secrets-store-csi-driver-provider-aws
+helm repo update
+
+helm upgrade --install csi-secrets-store `
+  secrets-store-csi-driver/secrets-store-csi-driver `
+  --namespace kube-system
+
+helm upgrade --install secrets-provider-aws `
+  aws-secrets-manager/secrets-store-csi-driver-provider-aws `
+  --namespace kube-system `
+  --set secrets-store-csi-driver.install=false
 ```
 
-Configure `kubectl` from a host that can reach the private EKS endpoint.
+Verify the driver, provider, and CRD:
 
 ```powershell
-aws eks update-kubeconfig `
-  --region $AWS_REGION `
-  --name $CLUSTER_NAME
-
-kubectl get nodes
+kubectl get pods -n kube-system -l app=secrets-store-csi-driver
+kubectl get pods -n kube-system -l app=secrets-store-csi-driver-provider-aws
+kubectl get crd secretproviderclasses.secrets-store.csi.x-k8s.io
 ```
 
-## Build And Push The Gateway Image
+## 3. Verify Storage And Model Access
 
-Build from the repository root so the gateway Dockerfile can use the `gateway` directory as its build context.
+The storage class is already represented in the repository:
 
 ```powershell
-cd ..\..
+kubectl apply -f k8s/aws/storage-class.yaml
+kubectl get storageclass gp3
+```
 
-$IMAGE_TAG = "0.1.0"
-$GATEWAY_IMAGE = "$($GATEWAY_ECR_REPOSITORY_URL):$IMAGE_TAG"
-$ECR_REGISTRY = ($GATEWAY_ECR_REPOSITORY_URL -split "/")[0]
+The expected S3 prefix is:
 
-aws ecr get-login-password --region $AWS_REGION |
+```text
+s3://openvino-llm-models-654158184275-ap-south-1/OpenVINO/Phi-3.5-mini-instruct-int4-ov/
+```
+
+Verify that it contains the OpenVINO model, tokenizer, and configuration files:
+
+```powershell
+aws s3 ls s3://openvino-llm-models-654158184275-ap-south-1/OpenVINO/Phi-3.5-mini-instruct-int4-ov/ --recursive --region $REGION
+```
+
+The `ovms-model-reader` service account uses the existing EKS Pod Identity
+association and the role `openvino-llm-poc-ovms-model-reader`. Its IAM policy
+must allow `s3:ListBucket` on the bucket and `s3:GetObject` on only this prefix.
+No IAM role annotation belongs in the service-account YAML.
+
+## 4. Build And Push The Gateway
+
+Create a private ECR repository named `openvino-llm-gateway`, then run from the
+repository root:
+
+```powershell
+$ACCOUNT_ID = aws sts get-caller-identity --query Account --output text
+$ECR_REGISTRY = "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+$GATEWAY_IMAGE = "$ECR_REGISTRY/openvino-llm-gateway:0.1.0"
+
+aws ecr get-login-password --region $REGION |
   docker login --username AWS --password-stdin $ECR_REGISTRY
 
 docker build -t $GATEWAY_IMAGE .\gateway
 docker push $GATEWAY_IMAGE
 ```
 
-## Replace Manifest Placeholders
+Replace `REPLACE_WITH_GATEWAY_ECR_IMAGE` in `k8s/aws/gateway.yaml` with the
+resulting image URI. Do not change the OVMS image digest during this demo.
 
-The AWS manifests intentionally contain placeholders until Terraform has created the real AWS resources and the gateway image is pushed.
+## 5. Create The Gateway Secret Identity
 
-Set the Git repository URL that Argo CD should sync.
-
-```powershell
-$GIT_REPOSITORY_URL = "https://github.com/YOUR_ORG/YOUR_REPO.git"
-```
-
-Replace the placeholders in place.
-
-```powershell
-$gatewayManifest = Get-Content -Raw k8s/aws/gateway.yaml
-$gatewayManifest = $gatewayManifest.Replace("REPLACE_WITH_GATEWAY_SERVICE_ACCOUNT_ROLE_ARN", $GATEWAY_SERVICE_ACCOUNT_ROLE_ARN)
-$gatewayManifest = $gatewayManifest.Replace("REPLACE_WITH_GATEWAY_ECR_IMAGE", $GATEWAY_IMAGE)
-Set-Content -NoNewline k8s/aws/gateway.yaml $gatewayManifest
-
-$blueManifest = Get-Content -Raw k8s/aws/ovms-blue.yaml
-$blueManifest = $blueManifest.Replace("REPLACE_WITH_OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN", $OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN)
-$blueManifest = $blueManifest.Replace("REPLACE_WITH_MODEL_BUCKET_NAME", $MODEL_BUCKET)
-Set-Content -NoNewline k8s/aws/ovms-blue.yaml $blueManifest
-
-$greenManifest = Get-Content -Raw k8s/aws/ovms-green.yaml
-$greenManifest = $greenManifest.Replace("REPLACE_WITH_MODEL_BUCKET_NAME", $MODEL_BUCKET)
-Set-Content -NoNewline k8s/aws/ovms-green.yaml $greenManifest
-
-$ingressManifest = Get-Content -Raw k8s/aws/gateway-ingress.yaml
-$ingressManifest = $ingressManifest.Replace("REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID", $INTERNAL_ALB_SECURITY_GROUP_ID)
-Set-Content -NoNewline k8s/aws/gateway-ingress.yaml $ingressManifest
-
-$argoApplication = Get-Content -Raw k8s/aws/argocd-application.yaml
-$argoApplication = $argoApplication.Replace("REPLACE_WITH_GIT_REPOSITORY_URL", $GIT_REPOSITORY_URL)
-Set-Content -NoNewline k8s/aws/argocd-application.yaml $argoApplication
-```
-
-Commit and push those manifest changes to the branch Argo CD tracks:
-
-```powershell
-git add k8s/aws
-git commit -m "Configure AWS EKS OpenVINO manifests"
-git push origin codex/aws-eks-openvino-poc
-```
-
-The Argo CD Application uses `targetRevision: codex/aws-eks-openvino-poc` and path `k8s/aws`.
-
-## Populate The Gateway API Key Secret
-
-Terraform creates the Secrets Manager secret, but it does not create the secret value. Add the value before starting gateway pods.
+Create the Secrets Manager value expected by
+`k8s/aws/gateway-secret-provider.yaml`:
 
 ```powershell
 $GATEWAY_API_KEY = Read-Host "Gateway API key"
 
+aws secretsmanager create-secret `
+  --name /openvino-llm-poc/gateway/api-key `
+  --secret-string $GATEWAY_API_KEY `
+  --region $REGION
+```
+
+If the secret already exists, update it instead:
+
+```powershell
 aws secretsmanager put-secret-value `
-  --region $AWS_REGION `
-  --secret-id $GATEWAY_API_KEY_SECRET_ARN `
-  --secret-string $GATEWAY_API_KEY
+  --secret-id /openvino-llm-poc/gateway/api-key `
+  --secret-string $GATEWAY_API_KEY `
+  --region $REGION
 ```
 
-The manifest `k8s/aws/gateway-secret-provider.yaml` mounts this secret as `/mnt/secrets-store/api-key`.
-
-## Upload Model Artifacts
-
-Upload approved OpenVINO model artifacts to the S3 path expected by both blue and green OVMS StatefulSets.
+Create an IAM role with EKS Pod Identity trust and permission to read only this
+secret. Associate it with namespace `llm-inference` and service account
+`llm-gateway`. Confirm the association before deploying:
 
 ```powershell
-$LOCAL_MODEL_DIR = "C:\models\OpenVINO\Phi-3-mini-FastDraft-50M-int8-ov"
-$S3_MODEL_PREFIX = "s3://$MODEL_BUCKET/OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov"
-
-aws s3 sync $LOCAL_MODEL_DIR $S3_MODEL_PREFIX --region $AWS_REGION
+aws eks list-pod-identity-associations `
+  --cluster-name $CLUSTER `
+  --namespace llm-inference `
+  --service-account llm-gateway `
+  --region $REGION `
+  --output table
 ```
 
-Use only approved model artifacts for the POC. The manifests expect the model path `OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov`.
+## 6. Validate The Ready Manifests
 
-## Apply The Argo CD Application
+The model bucket, model name, resources, storage class, and OVMS identity are
+already concrete. Only these placeholders remain:
 
-Apply the Application after replacing `repoURL` and pushing the manifest changes.
+```text
+REPLACE_WITH_GATEWAY_ECR_IMAGE
+REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID
+REPLACE_WITH_GIT_REPOSITORY_URL
+```
+
+The last two belong to the later ingress and Argo CD steps. After replacing the
+gateway image, validate the manifests against the live API:
 
 ```powershell
-kubectl apply -f k8s/aws/argocd-application.yaml
-
-kubectl get application -n argocd openvino-llm-poc
-kubectl get pods -n llm-inference -o wide
-kubectl get ingress -n llm-inference llm-gateway-internal
+kubectl apply --dry-run=server -f k8s/aws/storage-class.yaml
+kubectl apply --dry-run=server -f k8s/aws/namespace.yaml
+kubectl apply --dry-run=server -f k8s/aws/gateway-config.yaml
+kubectl apply --dry-run=server -f k8s/aws/ovms-blue.yaml
+kubectl apply --dry-run=server -f k8s/aws/ovms-green.yaml
+kubectl apply --dry-run=server -f k8s/aws/gateway-secret-provider.yaml
+kubectl apply --dry-run=server -f k8s/aws/gateway.yaml
+kubectl apply --dry-run=server -f k8s/aws/hpa.yaml
+kubectl apply --dry-run=server -f k8s/aws/pdb.yaml
 ```
 
-For the low-cost demo default, expect one blue OVMS pod and zero green OVMS pods:
+Do not validate or apply `gateway-ingress.yaml` or `argocd-application.yaml`
+until their placeholders are replaced and their controllers are installed.
+
+## 7. Deploy The Demo Directly
+
+Apply resources in dependency order:
 
 ```powershell
-kubectl get statefulset -n llm-inference ovms-blue ovms-green
+kubectl apply -f k8s/aws/storage-class.yaml
+kubectl apply -f k8s/aws/namespace.yaml
+kubectl apply -f k8s/aws/gateway-config.yaml
+kubectl apply -f k8s/aws/ovms-blue.yaml
+kubectl apply -f k8s/aws/ovms-green.yaml
+kubectl apply -f k8s/aws/gateway-secret-provider.yaml
+kubectl apply -f k8s/aws/gateway.yaml
+kubectl apply -f k8s/aws/hpa.yaml
+kubectl apply -f k8s/aws/pdb.yaml
 ```
 
-Wait for the ALB address to appear:
+Watch the model copy and startup rather than repeatedly restarting it:
 
 ```powershell
-$ALB_HOSTNAME = kubectl get ingress -n llm-inference llm-gateway-internal -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
-$ALB_URL = "http://$ALB_HOSTNAME"
+kubectl get pods,pvc -n llm-inference -w
+kubectl logs -n llm-inference statefulset/ovms-blue -c sync-model -f
+kubectl logs -n llm-inference statefulset/ovms-blue -c ovms -f
 ```
 
-Run smoke and benchmark tests from a host that can reach the internal ALB.
+Expected steady state:
+
+```text
+ovms-blue:  1 ready
+ovms-green: 0 replicas
+llm-gateway: 1 ready
+model-cache-ovms-blue-0: Bound
+```
+
+Check the OVMS model status from inside the cluster:
 
 ```powershell
-.\scripts\aws-smoke-test.ps1 -Url $ALB_URL -ApiKey $GATEWAY_API_KEY
-.\scripts\aws-benchmark.ps1 -Url $ALB_URL -ApiKey $GATEWAY_API_KEY -Runs 5
+kubectl run ovms-check --rm -i --restart=Never `
+  --image=curlimages/curl:8.12.1 `
+  -n llm-inference -- `
+  curl -fsS http://ovms-blue-service:8000/v1/config
 ```
 
-Run the failure demo from an environment with `kubectl` access to the private EKS endpoint.
+## 8. Smoke-Test Before Adding Ingress
 
-```bash
-NAMESPACE=llm-inference LABEL_SELECTOR='app=ovms-llm,color=blue' ./scripts/aws-failure-demo.sh
-```
-
-The failure demo deletes one blue OVMS pod and waits for the StatefulSet to recover.
-
-## Blue-Green Promotion
-
-The active OVMS target is controlled in `k8s/aws/gateway-config.yaml`.
-
-Blue target:
-
-```yaml
-OVMS_URL: http://ovms-blue-service.llm-inference.svc.cluster.local:8000/v3/chat/completions
-```
-
-Green target:
-
-```yaml
-OVMS_URL: http://ovms-green-service.llm-inference.svc.cluster.local:8000/v3/chat/completions
-```
-
-To promote green, first scale green up and wait for it to become ready:
+Keep this terminal open:
 
 ```powershell
-kubectl scale statefulset/ovms-green -n llm-inference --replicas=1
-kubectl rollout status statefulset/ovms-green -n llm-inference --timeout=10m
-
-$gatewayConfig = Get-Content -Raw k8s/aws/gateway-config.yaml
-$gatewayConfig = $gatewayConfig.Replace("http://ovms-blue-service.llm-inference.svc.cluster.local:8000/v3/chat/completions", "http://ovms-green-service.llm-inference.svc.cluster.local:8000/v3/chat/completions")
-Set-Content -NoNewline k8s/aws/gateway-config.yaml $gatewayConfig
-
-git add k8s/aws/gateway-config.yaml
-git commit -m "Promote OpenVINO green target"
-git push origin codex/aws-eks-openvino-poc
+kubectl port-forward -n llm-inference service/llm-gateway-service 8080:8080
 ```
 
-Then sync or wait for Argo CD automated sync:
+In a second terminal:
 
 ```powershell
-kubectl get application -n argocd openvino-llm-poc
-kubectl rollout restart deployment/llm-gateway -n llm-inference
-kubectl rollout status deployment/llm-gateway -n llm-inference --timeout=5m
-.\scripts\aws-smoke-test.ps1 -Url $ALB_URL -ApiKey $GATEWAY_API_KEY
+.\scripts\aws-smoke-test.ps1 -Url http://127.0.0.1:8080 -ApiKey $GATEWAY_API_KEY
 ```
 
-The gateway reads `OVMS_URL` from a ConfigMap as an environment variable, so restart the gateway deployment after changing the ConfigMap.
+Run one smoke request first. Do not start a benchmark until the pod remains
+stable and the response is correct. Then use a small run count:
 
-## Known Local Validation Gaps
+```powershell
+.\scripts\aws-benchmark.ps1 -Url http://127.0.0.1:8080 -ApiKey $GATEWAY_API_KEY -Runs 3
+```
 
-- Gateway unit tests run from the repository root with `python -m pytest gateway/tests`.
-- A real AWS account, Terraform CLI, and EKS cluster are required to validate infrastructure creation.
-- The local environment cannot prove the private EKS endpoint, Helm releases, IRSA, CSI mounts, ALB provisioning, S3 model sync, EBS volumes, gateway HPA behavior, or OVMS readiness.
-- `kubectl --dry-run` is not meaningful for this stack without a live cluster and installed CRDs such as Argo CD `Application` and Secrets Store CSI `SecretProviderClass`.
-- Local documentation validation is limited to static checks such as `git diff --check`.
+## 9. Add The Internal ALB
+
+After the direct smoke test succeeds:
+
+1. Install the AWS Load Balancer Controller with EKS Pod Identity.
+2. Create or select the internal ALB security group.
+3. Replace `REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID` in
+   `k8s/aws/gateway-ingress.yaml`.
+4. Apply the ingress and wait for its internal hostname.
+
+```powershell
+kubectl apply -f k8s/aws/gateway-ingress.yaml
+kubectl get ingress -n llm-inference llm-gateway-internal -w
+```
+
+The ALB is internal, so test it only from the Intel DMZ VPN or another private
+path into the VPC.
+
+## 10. Production-Shaped Follow-Up
+
+Do these only after the one-node demo works:
+
+- add workers across two Availability Zones before increasing replicas;
+- mirror public AWS CLI and OVMS images into private ECR;
+- add any missing VPC endpoints, including Elastic Load Balancing when NAT is
+  removed;
+- remove private-subnet default routes to the NAT Gateway, then delete the NAT;
+- disable public EKS API access after verifying private administration;
+- enable Argo CD and replace `REPLACE_WITH_GIT_REPOSITORY_URL`;
+- test blue-green promotion and node failure only after spare capacity exists.
+
+The HPA allows up to two gateway replicas, but the current single node is the
+capacity ceiling. This demo proves deployment and request flow, not multi-AZ
+resilience.

@@ -10,3 +10,4 @@ k8s/gateway-baremetal-rendered.yaml
 *.tfstate.*
 terraform.tfvars
 .superpowers/
+models/

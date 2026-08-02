@@ -1,149 +1,115 @@
 # AWS EKS OpenVINO LLM Inference POC
 
-This repository contains a production-shaped proof of concept for serving an
-OpenVINO LLM endpoint on Kubernetes using AWS EKS.
+This repository serves an OpenVINO-optimized open-source LLM on Amazon EKS.
+The current low-cost demo uses one Intel `m7i.xlarge` worker and keeps the
+production shape visible without pretending that a single node is highly
+available.
 
-The current implementation is private-only and AWS-based.
+## Current Demo Profile
 
-## What This Builds
+- Cluster: Amazon EKS `1.36` in two private subnets in `ap-south-1`.
+- Worker: one `m7i.xlarge` managed node labelled `nodepool=m7i-inference`.
+- Model: `OpenVINO/Phi-3.5-mini-instruct-int4-ov`.
+- Inference: one active OVMS blue StatefulSet; green remains at zero replicas.
+- Storage: encrypted `gp3` EBS cache provisioned by `ebs.csi.aws.com`.
+- Model source: private S3 bucket, read through EKS Pod Identity.
+- Gateway: one FastAPI pod; its image must still be pushed to private ECR.
+- Secret: AWS Secrets Manager mounted through the Secrets Store CSI driver.
+- Bootstrap egress: a temporary NAT Gateway permits public image pulls.
+- Target ingress: an internal AWS ALB, reachable only through the private network.
 
-- A private EKS `1.36` cluster running in private subnets.
-- Intel M7i managed node groups for OpenVINO CPU inference.
-- OpenVINO Model Server running a low-cost blue active StatefulSet and a green
-  standby StatefulSet scaled to zero by default.
-- A FastAPI gateway in front of OVMS.
-- An internal AWS ALB for private user access.
-- AWS Secrets Manager integration through Secrets Store CSI Driver.
-- S3 model storage with EBS-backed per-pod model caches.
-- Argo CD GitOps sync for Kubernetes manifests.
-- Metrics Server, gateway HPA, and PodDisruptionBudget resources for a
-  production-shaped deployment.
-- Smoke, benchmark, and failure-demo scripts.
+The live learning cluster currently has both private and public EKS API access
+enabled. The application ALB remains internal. Disable public EKS API access
+after a VPN, Direct Connect path, or VPC-hosted runner can reach the private API.
 
-Strict scope note: this branch validates the AWS EKS architecture and Intel CPU
-inference path. It does not claim Intel GPU or NPU validation.
+Strict scope: this AWS version demonstrates Intel CPU inference. It does not
+claim Intel GPU or NPU validation.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    User["Private user or app<br/>inside corporate/VPC network"]
-    ALB["Internal AWS ALB<br/>private only"]
-    GatewaySvc["Kubernetes Service<br/>llm-gateway"]
-    GatewayPods["FastAPI Gateway Deployment<br/>API key check, request forwarding"]
-    SecretCSI["Secrets Store CSI Driver<br/>AWS provider"]
-    SecretsManager["AWS Secrets Manager<br/>gateway API key"]
-    ConfigMap["ConfigMap<br/>active OVMS target"]
-    BlueSvc["ovms-blue-service<br/>ClusterIP"]
-    GreenSvc["ovms-green-service<br/>ClusterIP"]
-    BlueOVMS["OVMS Blue StatefulSet<br/>OpenVINO model server"]
-    GreenOVMS["OVMS Green StatefulSet<br/>standby, replicas 0"]
-    EBS["EBS volumes<br/>model cache per pod"]
-    S3["S3 bucket<br/>OpenVINO model artifacts"]
-    ECR["ECR<br/>gateway image"]
-    Argo["Argo CD<br/>syncs k8s/aws"]
-    Git["Git repository<br/>this branch"]
-    Terraform["Terraform<br/>terraform/aws"]
-    AWSInfra["AWS foundation<br/>VPC, EKS, IAM, ALB, S3, ECR"]
+    Client["Private client<br/>Intel DMZ VPN or VPC"]
+    ALB["Internal ALB<br/>planned private entry point"]
+    Gateway["FastAPI gateway<br/>1 pod"]
+    Secret["Secrets Store CSI<br/>API key from Secrets Manager"]
+    Blue["OVMS blue<br/>1 active pod"]
+    Green["OVMS green<br/>0 standby pods"]
+    PVC["Encrypted gp3 PVC<br/>model cache"]
+    S3["Private S3 bucket<br/>Phi-3.5 OpenVINO model"]
+    Identity["EKS Pod Identity<br/>scoped S3 and secret access"]
+    Worker["One m7i.xlarge worker<br/>private subnet"]
 
-    User --> ALB --> GatewaySvc --> GatewayPods
-    GatewayPods --> ConfigMap
-    GatewayPods --> SecretCSI --> SecretsManager
-    ConfigMap --> BlueSvc
-    ConfigMap -. "promotion switch" .-> GreenSvc
-    BlueSvc --> BlueOVMS
-    GreenSvc --> GreenOVMS
-    BlueOVMS --> EBS
-    GreenOVMS --> EBS
-    BlueOVMS --> S3
-    GreenOVMS --> S3
-    GatewayPods --> ECR
-    Git --> Argo --> GatewayPods
-    Git --> Argo --> BlueOVMS
-    Git --> Argo --> GreenOVMS
-    Terraform --> AWSInfra
+    Client --> ALB --> Gateway --> Blue
+    Gateway --> Secret
+    Gateway -. "later promotion" .-> Green
+    Blue --> PVC
+    Green --> PVC
+    S3 --> PVC
+    Identity --> Gateway
+    Identity --> Blue
+    Worker --- Gateway
+    Worker --- Blue
 ```
+
+## Request Flow
+
+1. A private client sends an authenticated request to the internal ALB.
+2. The ALB routes it to the gateway ClusterIP service.
+3. The gateway checks the API key mounted from Secrets Manager.
+4. The gateway forwards the request to the active OVMS blue service.
+5. OVMS runs the Phi-3.5 INT4 model from its local EBS cache.
+6. On first start, an init container copies the model from S3 into that cache.
 
 ## Repository Layout
 
 | Path | Purpose |
 | --- | --- |
-| `terraform/aws` | AWS foundation: VPC, private EKS, node groups, IAM, ECR, S3, Secrets Manager, controllers, and outputs. |
-| `k8s/aws` | Kubernetes application manifests synced by Argo CD. |
-| `gateway/app/main.py` | FastAPI gateway that validates the API key and forwards chat requests to OVMS. |
-| `gateway/Dockerfile` | Container build for the gateway image. |
-| `scripts/aws-smoke-test.ps1` | Basic gateway health and chat smoke test. |
-| `scripts/aws-benchmark.ps1` | Simple repeated-request benchmark. |
-| `scripts/aws-failure-demo.sh` | Deletes one OVMS pod and waits for Kubernetes recovery. |
-| `docs/aws-eks-openvino-llm-poc.md` | Full deployment runbook and operating notes. |
+| `k8s/aws` | EKS application, storage, secret-mount, scaling, and ingress manifests. |
+| `gateway` | FastAPI gateway, container definition, and tests. |
+| `scripts` | Smoke, benchmark, and recovery demonstration commands. |
+| `terraform/aws` | Optional production-oriented infrastructure automation. |
+| `docs/aws-eks-openvino-llm-poc.md` | Manual deployment runbook matching the current console-built cluster. |
 
-## Main Data Flow
+## Deploy From The Current State
 
-1. A private client calls the internal ALB.
-2. The ALB routes traffic to the gateway service.
-3. The gateway validates the API key mounted from AWS Secrets Manager.
-4. The gateway forwards chat requests to the active OVMS service.
-5. OVMS serves the OpenVINO model from its local EBS cache.
-6. Model artifacts are originally loaded from S3 into the pod cache.
-7. Blue-green promotion is done by changing the gateway `OVMS_URL` ConfigMap.
+Use the detailed runbook:
 
-## Deployment Flow
+[AWS EKS deployment runbook](docs/aws-eks-openvino-llm-poc.md)
 
-1. Connect to the Intel DMZ VPN or another private route that can reach the EKS
-   private API endpoint and internal ALB.
-2. Create AWS infrastructure with Terraform from `terraform/aws`.
+The immediate sequence is:
+
+1. Verify the node, CoreDNS, Metrics Server, EBS CSI, Secrets Store CSI, Pod Identity, and `gp3`.
+2. Verify the Phi-3.5 model prefix in S3.
 3. Build and push the gateway image to ECR.
-4. Replace manifest placeholders in `k8s/aws`.
-5. Add the gateway API key value to AWS Secrets Manager.
-6. Upload approved OpenVINO model artifacts to S3.
-7. Apply the Argo CD Application.
-8. Run smoke and benchmark scripts from the same private network path.
+4. Create the gateway secret and its Pod Identity association.
+5. Replace only the remaining deployment-specific placeholders.
+6. Apply the manifests directly and wait for OVMS readiness.
+7. Smoke-test through port-forwarding before adding the internal ALB.
 
-The detailed command-by-command runbook is here:
-
-[docs/aws-eks-openvino-llm-poc.md](docs/aws-eks-openvino-llm-poc.md)
-
-## Important Placeholders
-
-The manifests intentionally include placeholders until Terraform and image
-builds produce real values:
+## Remaining Placeholders
 
 - `REPLACE_WITH_GATEWAY_ECR_IMAGE`
-- `REPLACE_WITH_GATEWAY_SERVICE_ACCOUNT_ROLE_ARN`
-- `REPLACE_WITH_OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN`
-- `REPLACE_WITH_MODEL_BUCKET_NAME`
 - `REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID`
 - `REPLACE_WITH_GIT_REPOSITORY_URL`
 
-Do not apply the manifests before replacing these values.
+The Git repository placeholder is needed only when Argo CD is enabled. Do not
+apply a manifest while a placeholder required by that manifest remains.
+
+## Capacity And Reliability
+
+OVMS requests 2 vCPU and 6 GiB and is limited to 3 vCPU and 12 GiB. The gateway
+requests 250 millicores and 256 MiB. This fits one `m7i.xlarge`, but one worker,
+one active OVMS replica, and one gateway replica provide no node-level high
+availability. Add workers before raising replica counts or testing failover.
 
 ## Validation
 
-Local validation currently covers:
-
-- FastAPI gateway unit tests from the repository root:
-
-  ```powershell
-  python -m pytest gateway/tests
-  ```
-
-- YAML parse checks for Kubernetes manifests.
-- PowerShell script parser checks.
-- Git whitespace checks.
-
-Live validation still requires a real AWS account and a reachable private EKS
-cluster. Terraform, ALB provisioning, IRSA, CSI mounts, S3 model sync, EBS
-volumes, gateway HPA behavior, and OVMS readiness cannot be fully proven
-locally.
-
-## Current Branch
-
-The active development branch is:
-
-```text
-codex/aws-eks-openvino-poc
+```powershell
+python -m pytest gateway/tests
+git diff --check
 ```
 
-The branch has been pushed to:
-
-[github.com/tusharkrbarman/k8s/tree/codex/aws-eks-openvino-poc](https://github.com/tusharkrbarman/k8s/tree/codex/aws-eks-openvino-poc)
+Live validation requires access to the EKS API and is documented in the
+runbook. Keep model artifacts under `models/` local-only; the directory is
+ignored by Git.
