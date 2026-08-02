@@ -57,30 +57,42 @@ for core AWS APIs. The two endpoints that were required during node and EBS CSI
 bootstrap were `com.amazonaws.ap-south-1.ec2` and
 `com.amazonaws.ap-south-1.eks-auth`.
 
-The AWS secrets provider does not replace the upstream Secrets Store CSI
-driver. Install both while the temporary NAT path is available:
+Use the AWS-managed add-on as the single owner of the Secrets Store CSI driver
+and AWS provider. For the existing learning cluster, first remove the
+self-managed Helm release if it is present:
 
-```powershell
-helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
-helm repo add aws-secrets-manager https://aws.github.io/secrets-store-csi-driver-provider-aws
-helm repo update
-
-helm upgrade --install csi-secrets-store `
-  secrets-store-csi-driver/secrets-store-csi-driver `
-  --namespace kube-system
-
-helm upgrade --install secrets-provider-aws `
-  aws-secrets-manager/secrets-store-csi-driver-provider-aws `
-  --namespace kube-system `
-  --set secrets-store-csi-driver.install=false
+```cmd
+helm uninstall csi-secrets-store --namespace kube-system
 ```
 
-Verify the driver, provider, and CRD:
+Delete any failed copy of the managed add-on, then create it with one-time
+conflict adoption:
 
-```powershell
-kubectl get pods -n kube-system -l app=secrets-store-csi-driver
-kubectl get pods -n kube-system -l app=secrets-store-csi-driver-provider-aws
+```cmd
+aws eks delete-addon --cluster-name openvino-llm-poc --addon-name aws-secrets-store-csi-driver-provider --region ap-south-1
+aws eks create-addon --cluster-name openvino-llm-poc --addon-name aws-secrets-store-csi-driver-provider --region ap-south-1 --resolve-conflicts OVERWRITE
+aws eks wait addon-active --cluster-name openvino-llm-poc --addon-name aws-secrets-store-csi-driver-provider --region ap-south-1
+```
+
+If deletion reports `ResourceNotFoundException`, continue with creation. Verify
+the managed add-on, pods, driver, and CRD:
+
+```cmd
+aws eks describe-addon --cluster-name openvino-llm-poc --addon-name aws-secrets-store-csi-driver-provider --region ap-south-1 --query "addon.status" --output text
+kubectl get pods -n kube-system | findstr /i "secrets provider"
+kubectl get csidriver secrets-store.csi.k8s.io
 kubectl get crd secretproviderclasses.secrets-store.csi.x-k8s.io
+```
+
+`terraform/aws/main.tf` declares the same managed add-on. In a new
+Terraform-created environment, Terraform creates it directly. Do not run a
+blanket `terraform apply` against this manually created cluster: its VPC, EKS
+cluster, IAM, and node groups are not represented in this Terraform state. If
+the existing environment is later adopted into Terraform, import and reconcile
+the full infrastructure first; the add-on import identifier is:
+
+```cmd
+terraform import aws_eks_addon.secrets_store_csi_driver_provider openvino-llm-poc:aws-secrets-store-csi-driver-provider
 ```
 
 ## 3. Verify Storage And Model Access

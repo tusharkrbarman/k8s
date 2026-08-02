@@ -176,6 +176,17 @@ resource "aws_eks_addon" "ebs_csi_driver" {
   tags = local.tags
 }
 
+resource "aws_eks_addon" "secrets_store_csi_driver_provider" {
+  cluster_name                = module.eks.cluster_name
+  addon_name                  = "aws-secrets-store-csi-driver-provider"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "PRESERVE"
+
+  depends_on = [module.eks]
+
+  tags = local.tags
+}
+
 resource "aws_ecr_repository" "gateway" {
   name                 = var.gateway_image_name
   image_tag_mutability = "MUTABLE"
@@ -459,36 +470,6 @@ resource "helm_release" "aws_load_balancer_controller" {
   }
 
   depends_on = [kubernetes_service_account.aws_load_balancer_controller]
-}
-
-resource "helm_release" "secrets_store_csi_driver" {
-  name       = "secrets-store-csi-driver"
-  repository = "https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts"
-  chart      = "secrets-store-csi-driver"
-  version    = var.secrets_store_csi_driver_chart_version
-  namespace  = "kube-system"
-
-  set {
-    name  = "syncSecret.enabled"
-    value = "false"
-  }
-
-  set {
-    name  = "enableSecretRotation"
-    value = "true"
-  }
-
-  depends_on = [module.eks]
-}
-
-resource "helm_release" "aws_secrets_manager_csi_driver_provider" {
-  name       = "aws-secrets-manager-csi-driver-provider"
-  repository = "https://aws.github.io/secrets-store-csi-driver-provider-aws"
-  chart      = "secrets-store-csi-driver-provider-aws"
-  version    = var.aws_secrets_provider_chart_version
-  namespace  = "kube-system"
-
-  depends_on = [helm_release.secrets_store_csi_driver]
 }
 
 resource "helm_release" "metrics_server" {

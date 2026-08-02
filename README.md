@@ -14,7 +14,7 @@ available.
 - Storage: encrypted `gp3` EBS cache provisioned by `ebs.csi.aws.com`.
 - Model source: private S3 bucket, read through EKS Pod Identity.
 - Gateway: one FastAPI pod; its image must still be pushed to private ECR.
-- Secret: AWS Secrets Manager mounted through the Secrets Store CSI driver.
+- Secret: AWS Secrets Manager mounted through the AWS-managed Secrets Store CSI add-on.
 - Bootstrap egress: a temporary NAT Gateway permits public image pulls.
 - Target ingress: an internal AWS ALB, reachable only through the private network.
 
@@ -79,7 +79,7 @@ Use the detailed runbook:
 
 The immediate sequence is:
 
-1. Verify the node, CoreDNS, Metrics Server, EBS CSI, Secrets Store CSI, Pod Identity, and `gp3`.
+1. Verify the node, CoreDNS, Metrics Server, EBS CSI, the AWS-managed Secrets Store CSI add-on, Pod Identity, and `gp3`.
 2. Verify the Phi-3.5 model prefix in S3.
 3. Build and push the gateway image to ECR.
 4. Create the gateway secret and its Pod Identity association.

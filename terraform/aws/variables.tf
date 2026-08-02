@@ -57,18 +57,6 @@ variable "aws_load_balancer_controller_chart_version" {
   default     = "1.8.2"
 }
 
-variable "secrets_store_csi_driver_chart_version" {
-  description = "Pinned Secrets Store CSI Driver Helm chart version."
-  type        = string
-  default     = "1.4.8"
-}
-
-variable "aws_secrets_provider_chart_version" {
-  description = "Pinned AWS Secrets Manager CSI provider Helm chart version."
-  type        = string
-  default     = "1.0.1"
-}
-
 variable "metrics_server_chart_version" {
   description = "Pinned metrics-server Helm chart version."
   type        = string
