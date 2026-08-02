@@ -138,8 +138,10 @@ docker build -t $GATEWAY_IMAGE .\gateway
 docker push $GATEWAY_IMAGE
 ```
 
-Replace `REPLACE_WITH_GATEWAY_ECR_IMAGE` in `k8s/aws/gateway.yaml` with the
-resulting image URI. Do not change the OVMS image digest during this demo.
+The current gateway manifest is pinned to the immutable digest produced by tag
+`0.1.0`. When rebuilding, query the new digest and update the manifest rather
+than deploying a mutable tag. Do not change the OVMS image digest during this
+demo.
 
 ## 5. Create The Gateway Secret Identity
 
@@ -183,13 +185,12 @@ The model bucket, model name, resources, storage class, and OVMS identity are
 already concrete. Only these placeholders remain:
 
 ```text
-REPLACE_WITH_GATEWAY_ECR_IMAGE
 REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID
 REPLACE_WITH_GIT_REPOSITORY_URL
 ```
 
-The last two belong to the later ingress and Argo CD steps. After replacing the
-gateway image, validate the manifests against the live API:
+Both placeholders belong to the later ingress and Argo CD steps. With the
+gateway image digest pinned, validate the manifests against the live API:
 
 ```powershell
 kubectl apply --dry-run=server -f k8s/aws/storage-class.yaml

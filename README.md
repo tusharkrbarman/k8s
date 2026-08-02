@@ -81,7 +81,7 @@ The immediate sequence is:
 
 1. Verify the node, CoreDNS, Metrics Server, EBS CSI, the AWS-managed Secrets Store CSI add-on, Pod Identity, and `gp3`.
 2. Verify the Phi-3.5 model prefix in S3.
-3. Build and push the gateway image to ECR.
+3. Verify the digest-pinned gateway image in ECR.
 4. Create the gateway secret and its Pod Identity association.
 5. Replace only the remaining deployment-specific placeholders.
 6. Apply the manifests directly and wait for OVMS readiness.
@@ -89,7 +89,6 @@ The immediate sequence is:
 
 ## Remaining Placeholders
 
-- `REPLACE_WITH_GATEWAY_ECR_IMAGE`
 - `REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID`
 - `REPLACE_WITH_GIT_REPOSITORY_URL`
 

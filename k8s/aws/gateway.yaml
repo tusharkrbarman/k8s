@@ -26,7 +26,7 @@ spec:
         nodepool: m7i-inference
       containers:
         - name: gateway
-          image: REPLACE_WITH_GATEWAY_ECR_IMAGE
+          image: 654158184275.dkr.ecr.ap-south-1.amazonaws.com/openvino-llm-gateway@sha256:cf1c230ebb3361d51c01b081dd6947c25e111be754fd0087fcd1181b0615ed07
           imagePullPolicy: IfNotPresent
           env:
             - name: OVMS_URL
