@@ -3,8 +3,6 @@ kind: ServiceAccount
 metadata:
   name: ovms-model-reader
   namespace: llm-inference
-  annotations:
-    eks.amazonaws.com/role-arn: REPLACE_WITH_OVMS_MODEL_READER_SERVICE_ACCOUNT_ROLE_ARN
 ---
 apiVersion: v1
 kind: Service
@@ -64,8 +62,8 @@ spec:
             - aws
             - s3
             - sync
-            - s3://REPLACE_WITH_MODEL_BUCKET_NAME/OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov
-            - /models/OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov
+            - s3://openvino-llm-models-654158184275-ap-south-1/OpenVINO/Phi-3.5-mini-instruct-int4-ov
+            - /models/OpenVINO/Phi-3.5-mini-instruct-int4-ov
           volumeMounts:
             - name: model-cache
               mountPath: /models
@@ -75,7 +73,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --source_model
-            - OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov
+            - OpenVINO/Phi-3.5-mini-instruct-int4-ov
             - --model_repository_path
             - /models
             - --task
@@ -85,7 +83,7 @@ spec:
             - --target_device
             - CPU
             - --cache_size
-            - "2"
+            - "1"
           ports:
             - name: rest
               containerPort: 8000
@@ -108,11 +106,11 @@ spec:
             periodSeconds: 20
           resources:
             requests:
-              cpu: "4"
-              memory: 12Gi
+              cpu: "2"
+              memory: 6Gi
             limits:
-              cpu: "8"
-              memory: 24Gi
+              cpu: "3"
+              memory: 12Gi
           volumeMounts:
             - name: model-cache
               mountPath: /models
@@ -120,6 +118,7 @@ spec:
     - metadata:
         name: model-cache
       spec:
+        storageClassName: gp3
         accessModes:
           - ReadWriteOnce
         resources:
