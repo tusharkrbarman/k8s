@@ -3,8 +3,6 @@ kind: ServiceAccount
 metadata:
   name: llm-gateway
   namespace: llm-inference
-  annotations:
-    eks.amazonaws.com/role-arn: REPLACE_WITH_GATEWAY_SERVICE_ACCOUNT_ROLE_ARN
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -14,7 +12,7 @@ metadata:
   labels:
     app: llm-gateway
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: llm-gateway
@@ -25,7 +23,7 @@ spec:
     spec:
       serviceAccountName: llm-gateway
       nodeSelector:
-        nodepool: system-gateway
+        nodepool: m7i-inference
       containers:
         - name: gateway
           image: REPLACE_WITH_GATEWAY_ECR_IMAGE
