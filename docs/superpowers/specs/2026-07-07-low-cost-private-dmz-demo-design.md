@@ -5,10 +5,11 @@
 Make the AWS EKS OpenVINO LLM POC reliable enough for a first demo while
 keeping the architecture private-only and cost-conscious.
 
-The deployment environment is an Intel DMZ VPN-connected laptop or runner. That
-environment must be able to reach the private EKS API endpoint and the internal
-ALB. The EKS API endpoint remains private-only; there is no temporary public
-EKS API exposure for this design.
+The target deployment environment is an Intel DMZ VPN-connected laptop or
+runner. That environment must be able to reach the private EKS API endpoint and
+the internal ALB. The current learning cluster temporarily has public EKS API
+access enabled; this must be disabled after a private administrative path is
+available and before the POC is presented as private-only.
 
 ## Non-Goals
 
@@ -48,14 +49,42 @@ The first demo uses blue as the only active inference stack.
 
 - `ovms-blue` runs `1` replica by default.
 - `ovms-green` runs `0` replicas by default.
-- The inference node group remains small and can run the active OVMS pod without
-  scheduling four inference pods at once.
+- One `m7i.xlarge` node runs the Kubernetes system pods, one gateway replica,
+  and the active OVMS pod.
+- The gateway schedules on `nodepool=m7i-inference` for this single-node demo.
+- OVMS requests `2` CPU and `6 GiB` memory, is limited to `3` CPU and `12 GiB`
+  memory, and uses a `1 GiB` cache.
+- The gateway HPA uses a minimum of `1` and maximum of `2` replicas.
 - Blue-green promotion remains documented as a later operation: scale green up,
   verify it, update `OVMS_URL`, restart the gateway, then optionally scale blue
   down.
 
-This removes the current scheduling risk where two blue pods plus two green pods
-can exceed the allocatable CPU on a two-node `m7i.2xlarge` inference node group.
+This removes the scheduling risk caused by the previous manifests requesting
+more CPU and memory than the single `m7i.xlarge` can allocate.
+
+## Model And Storage
+
+- Use `OpenVINO/Phi-3.5-mini-instruct-int4-ov` as the standalone chat model.
+- Do not use `Phi-3-mini-FastDraft-50M-int8-ov` as the served chat model; it is
+  a draft model intended for speculative decoding with a target model.
+- Store the approved model under
+  `s3://openvino-llm-models-654158184275-ap-south-1/OpenVINO/Phi-3.5-mini-instruct-int4-ov/`.
+- Use an encrypted `gp3` StorageClass backed by `ebs.csi.aws.com` and
+  `WaitForFirstConsumer` for the OVMS model cache.
+- Use EKS Pod Identity for the `llm-inference/ovms-model-reader` service account
+  with read-only access to the exact S3 model prefix.
+
+## Private Networking During Bootstrap
+
+The live demo VPC uses private subnets and private AWS service endpoints. The
+EC2 and EKS Auth interface endpoints are required for node bootstrap and Pod
+Identity respectively. A public NAT Gateway is temporarily available for
+pulling public container images during this learning deployment. The gateway
+application remains private behind an internal ALB.
+
+For the production-shaped follow-up, mirror every runtime image into private
+ECR, verify all required VPC endpoints, remove the private-subnet default route
+to the NAT Gateway, and then delete the NAT Gateway.
 
 ## Terraform And Bootstrap Flow
 
