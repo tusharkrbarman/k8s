@@ -1,0 +1,8 @@
+adopt_existing = true
+
+region      = "ap-south-1"
+cluster_name = "openvino-llm-poc"
+vpc_id      = "vpc-09f5d3038235fc21d"
+
+controller_release_name  = "aws-load-balancer-controller"
+controller_chart_version = "1.14.0"

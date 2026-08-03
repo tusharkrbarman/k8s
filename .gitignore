@@ -8,6 +8,13 @@ k8s/gateway-baremetal-rendered.yaml
 .terraform/
 *.tfstate
 *.tfstate.*
+*.tfplan
 terraform.tfvars
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+terraform/**/*.tfplan
+terraform/**/*.tfvars
+!terraform/**/*.tfvars.example
+tmp/rendered-aws/
 .superpowers/
 models/

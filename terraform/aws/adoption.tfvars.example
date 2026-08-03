@@ -1,0 +1,74 @@
+adopt_existing = true
+
+region       = "ap-south-1"
+cluster_name = "openvino-llm-poc"
+
+existing_vpc_id             = "vpc-09f5d3038235fc21d"
+existing_internet_gateway_id = "igw-082293c3eb00ed3a4"
+existing_private_subnet_ids = {
+  "ap-south-1a" = "subnet-002bad3d9e2407605"
+  "ap-south-1b" = "subnet-0aefcc64a75b1dab2"
+}
+existing_public_subnet_ids = {
+  "ap-south-1a" = "subnet-0df2107dac2edca1c"
+  "ap-south-1b" = "subnet-0ac1cb049c3f1b4eb"
+}
+existing_private_route_table_id = "rtb-04fbbaf40f4c576d3"
+existing_public_route_table_id  = "rtb-04eda5e02cfcc8b82"
+existing_nat_gateway_id         = "nat-003d70cc050eb477b"
+existing_nat_eip_allocation_id  = "eipalloc-0d001fd8dcf505175"
+
+existing_vpc_endpoint_ids = {
+  s3             = "vpce-0cc110d6f7c882024"
+  "ecr.api"      = "vpce-005c8de33dc7f0d49"
+  "ecr.dkr"      = "vpce-0352069c0803e6298"
+  secretsmanager = "vpce-05e74664d1b90686c"
+  sts            = "vpce-08868ca77d66644e8"
+  logs           = "vpce-07b1931c28e5b97b2"
+  monitoring     = "vpce-0d4b5b652a5743903"
+  ec2            = "vpce-0edceba0100cbfeaf"
+  "eks-auth"    = "vpce-0acb341ffcd04a50a"
+}
+
+existing_security_group_ids = {
+  internal_alb  = "sg-0b68c332fe030f72c"
+  vpc_endpoints = "sg-04df117aec83a9df9"
+}
+existing_cluster_security_group_id = "sg-0ceda700d5a1c1473"
+
+cluster_role_name = "openvino-llm-poc-cluster-role"
+node_role_name    = "openvino-llm-poc-node-role"
+node_group_name   = "m7i-inference"
+node_instance_types = ["m7i.xlarge"]
+node_disk_size      = 100
+node_min_size       = 1
+node_desired_size   = 1
+node_max_size       = 1
+
+cluster_endpoint_private_access = true
+cluster_endpoint_public_access  = true
+cluster_public_access_cidrs    = ["0.0.0.0/0"]
+
+gateway_image_digest = "sha256:cf1c230ebb3361d51c01b081dd6947c25e111be754fd0087fcd1181b0615ed07"
+model_bucket_name    = "openvino-llm-models-654158184275-ap-south-1"
+model_prefix         = "OpenVINO/Phi-3.5-mini-instruct-int4-ov"
+gateway_api_key_secret_name = "/openvino-llm-poc/gateway/api-key"
+existing_gateway_api_key_secret_arn = "arn:aws:secretsmanager:ap-south-1:654158184275:secret:/openvino-llm-poc/gateway/api-key-3hsldu"
+ebs_csi_pod_identity_role_arn = "arn:aws:iam::654158184275:role/AmazonEKSPodIdentityAmazonEBSCSIDriverRole"
+
+cluster_admin_principal_arn = "arn:aws:iam::654158184275:user/tushar"
+
+existing_pod_identity_association_ids = {
+  gateway = "a-8oawlbwwbxjtahufy"
+  ovms    = "a-2mixrbashshvo8v9j"
+  lbc     = "a-gvg4cszaatmyoevue"
+}
+
+existing_access_entry_principals = {
+  node = "arn:aws:iam::654158184275:role/openvino-llm-poc-node-role"
+  user = "arn:aws:iam::654158184275:user/tushar"
+}
+
+existing_access_policy_association_ids = {
+  user_admin = "arn:aws:iam::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+}

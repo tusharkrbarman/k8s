@@ -13,7 +13,7 @@ available.
 - Inference: one active OVMS blue StatefulSet; green remains at zero replicas.
 - Storage: encrypted `gp3` EBS cache provisioned by `ebs.csi.aws.com`.
 - Model source: private S3 bucket, read through EKS Pod Identity.
-- Gateway: one FastAPI pod; its image must still be pushed to private ECR.
+- Gateway: one FastAPI pod using a digest-pinned image in private ECR.
 - Secret: AWS Secrets Manager mounted through the AWS-managed Secrets Store CSI add-on.
 - Bootstrap egress: a temporary NAT Gateway permits public image pulls.
 - Target ingress: an internal AWS ALB, reachable only through the private network.
@@ -30,7 +30,7 @@ claim Intel GPU or NPU validation.
 ```mermaid
 flowchart TB
     Client["Private client<br/>Intel DMZ VPN or VPC"]
-    ALB["Internal ALB<br/>planned private entry point"]
+    ALB["Internal AWS ALB<br/>private entry point"]
     Gateway["FastAPI gateway<br/>1 pod"]
     Secret["Secrets Store CSI<br/>API key from Secrets Manager"]
     Blue["OVMS blue<br/>1 active pod"]
@@ -67,33 +67,74 @@ flowchart TB
 | --- | --- |
 | `k8s/aws` | EKS application, storage, secret-mount, scaling, and ingress manifests. |
 | `gateway` | FastAPI gateway, container definition, and tests. |
-| `scripts` | Smoke, benchmark, and recovery demonstration commands. |
-| `terraform/aws` | Optional production-oriented infrastructure automation. |
+| `scripts` | Smoke, benchmark, recovery, and Terraform-output rendering commands. |
+| `terraform/aws` | AWS resource ownership, adoption imports, and clean-build infrastructure. |
+| `terraform/platform` | AWS Load Balancer Controller Helm ownership. |
 | `docs/aws-eks-openvino-llm-poc.md` | Manual deployment runbook matching the current console-built cluster. |
 
-## Deploy From The Current State
+## Adopt Or Build With Terraform
 
-Use the detailed runbook:
+Terraform uses local state in both roots. The adoption profile is a reference file;
+copy it to an ignored local file before running Terraform:
+
+```powershell
+Copy-Item terraform/aws/adoption.tfvars.example terraform/aws/adoption.tfvars
+terraform -chdir=terraform/aws init -backend=false
+terraform -chdir=terraform/aws validate
+terraform -chdir=terraform/aws plan '-var-file=adoption.tfvars' -out=adoption.tfplan
+```
+
+Review the plan. The current adoption plan should show imports only, with no
+replacement or destroy action. Apply only after that review, then run a second
+plan to confirm a clean state:
+
+```powershell
+terraform -chdir=terraform/aws apply adoption.tfplan
+terraform -chdir=terraform/aws plan '-var-file=adoption.tfvars'
+```
+
+Adopt the existing AWS Load Balancer Controller separately:
+
+```powershell
+Copy-Item terraform/platform/platform.tfvars.example terraform/platform/platform.tfvars
+terraform -chdir=terraform/platform init -backend=false
+terraform -chdir=terraform/platform validate
+terraform -chdir=terraform/platform plan '-var-file=platform.tfvars'
+```
+
+The platform adoption plan should import only
+`aws-load-balancer-controller`. Argo CD and external-dns are intentionally
+outside Terraform ownership. For a new environment, omit the adoption files
+and set `adopt_existing = false` in normal local variables.
+
+Use the detailed manual runbook for the Kubernetes deployment sequence:
 
 [AWS EKS deployment runbook](docs/aws-eks-openvino-llm-poc.md)
 
-The immediate sequence is:
+## Render Kubernetes Manifests
 
-1. Verify the node, CoreDNS, Metrics Server, EBS CSI, the AWS-managed Secrets Store CSI add-on, Pod Identity, and `gp3`.
-2. Verify the Phi-3.5 model prefix in S3.
-3. Verify the digest-pinned gateway image in ECR.
-4. Create the gateway secret and its Pod Identity association.
-5. Replace only the remaining deployment-specific placeholders.
-6. Apply the manifests directly and wait for OVMS readiness.
-7. Smoke-test through port-forwarding before adding the internal ALB.
+After the AWS root has state, render current Terraform outputs into ignored
+local files. The source manifests remain unchanged and no secret value is
+printed or copied into YAML:
+
+```powershell
+.\scripts\render-aws-manifests.ps1 `
+  -TerraformDir .\terraform\aws `
+  -OutputDir .\tmp\rendered-aws
+kubectl apply --dry-run=client -f .\tmp\rendered-aws
+```
+
+The renderer fills the model S3 location, gateway image digest, AWS region,
+Secrets Manager name, and internal ALB security group. It skips the Argo CD
+application manifest because that file still requires a repository-specific
+value.
 
 ## Remaining Placeholders
 
-- `REPLACE_WITH_INTERNAL_ALB_SECURITY_GROUP_ID`
 - `REPLACE_WITH_GIT_REPOSITORY_URL`
 
 The Git repository placeholder is needed only when Argo CD is enabled. Do not
-apply a manifest while a placeholder required by that manifest remains.
+apply that Argo CD manifest until its repository value is configured.
 
 ## Capacity And Reliability
 
@@ -106,6 +147,10 @@ availability. Add workers before raising replica counts or testing failover.
 
 ```powershell
 python -m pytest gateway/tests
+terraform -chdir=terraform/aws fmt -check
+terraform -chdir=terraform/aws validate
+terraform -chdir=terraform/platform fmt -check
+terraform -chdir=terraform/platform validate
 git diff --check
 ```
 

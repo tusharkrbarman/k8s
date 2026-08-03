@@ -35,8 +35,8 @@ The project serves an OpenVINO-optimized open-source language model behind a
 small FastAPI gateway. I first validated OpenVINO Model Server in Docker, moved
 it to Minikube, and then built a two-node k3s cluster on lightweight Ubuntu
 VMs to learn scheduling, Services, storage, resource limits, and failure
-diagnosis. The AWS implementation uses a private EKS cluster, internal
-Application Load Balancer, private subnets, IAM roles for service accounts,
+diagnosis. The AWS target implementation uses a private EKS cluster, internal
+Application Load Balancer, private subnets, EKS Pod Identity,
 S3 model storage, EBS model caches, Secrets Manager, and Argo CD. Kubernetes
 manages health, placement, restarts, gateway scaling, and blue-green model
 deployment.
@@ -58,12 +58,15 @@ container copies them into an EBS-backed persistent volume before OVMS starts.
 The API key stays in AWS Secrets Manager and is mounted into the gateway pod by
 the Secrets Store CSI Driver.
 
-The cluster is private-only. Worker nodes run in private subnets, the EKS API
-does not expose a public endpoint, and AWS service traffic can use VPC
-endpoints. The Terraform implementation defines the VPC, EKS, node groups,
-IAM, ECR, S3, Secrets Manager, controllers, and add-ons. Argo CD applies the
-Kubernetes manifests. Blue is active with one OVMS replica; green is defined
-but scaled to zero until a controlled promotion.
+The target cluster is private-only. Worker nodes run in private subnets, the
+EKS API is intended to be private, and AWS service traffic can use VPC
+endpoints. During the AWS learning exercise, public and private EKS API access
+were temporarily enabled to make laptop administration possible; the
+application ALB remained internal. The Terraform implementation defines the
+VPC, EKS, node group, IAM, ECR, S3, Secrets Manager metadata, controllers, and
+add-ons. Argo CD is the planned application reconciler. Blue is active with
+one OVMS replica; green is defined but scaled to zero until a controlled
+promotion.
 
 The strongest part of the project is the progression and troubleshooting. I
 diagnosed invalid image tags, model initialization timing, memory pressure,
@@ -296,9 +299,8 @@ and mapped the lessons into managed AWS services:
 | Manual model replacement | Blue-green OVMS Services and StatefulSets |
 | Ad hoc health checks | `/health`, `/ready`, startup, readiness, and liveness probes |
 
-The repository defaults to `us-east-1`; the console-learning deployment used
-`ap-south-1`. Region names change resource endpoints and pricing, but not the
-architecture.
+The repository and the console-learning deployment use `ap-south-1`. Region
+names change resource endpoints and pricing, but not the architecture.
 
 ## Final AWS EKS Architecture
 
@@ -308,7 +310,7 @@ flowchart TB
     ALB["Internal AWS ALB<br/>private DNS endpoint"]
     Ingress["Kubernetes Ingress<br/>AWS Load Balancer Controller"]
     GatewayService["llm-gateway-service<br/>ClusterIP"]
-    GatewayPods["FastAPI gateway Deployment<br/>2 replicas"]
+    GatewayPods["FastAPI gateway Deployment<br/>1 demo replica"]
     GatewayConfig["ConfigMap<br/>active OVMS URL and model"]
     SecretCSI["Secrets Store CSI Driver<br/>AWS provider"]
     Secrets["AWS Secrets Manager<br/>gateway API key"]
@@ -323,8 +325,8 @@ flowchart TB
     ECR["Amazon ECR<br/>gateway image"]
 
     EKS["Private Amazon EKS cluster<br/>private API endpoint"]
-    SystemNodes["system-gateway node group<br/>Intel M7i"]
-    InferenceNodes["m7i-inference node group<br/>Intel M7i CPU"]
+    SystemNodes["Optional platform node group<br/>production-shaped target"]
+    InferenceNodes["m7i-inference node group<br/>one demo worker"]
 
     Git["Git repository<br/>k8s/aws manifests"]
     Argo["Argo CD<br/>GitOps reconciliation"]
@@ -405,7 +407,7 @@ The end user never addresses the OVMS Service directly.
 2. Kubernetes creates the OVMS pod and its 20 GiB EBS-backed PVC.
 3. The sync-model init container runs before the OVMS container.
 4. The init container uses the ovms-model-reader service account.
-5. IRSA grants only S3 ListBucket and GetObject permissions.
+5. EKS Pod Identity grants only S3 ListBucket and GetObject permissions.
 6. aws s3 sync copies artifacts into /models on the PVC.
 7. OVMS starts only after synchronization succeeds.
 8. The startup probe waits for /v1/config.
@@ -419,7 +421,7 @@ the model cache on every container restart.
 
 ```text
 1. The API key value is stored in AWS Secrets Manager.
-2. The llm-gateway service account assumes its IRSA role.
+2. The llm-gateway service account uses its EKS Pod Identity association.
 3. The AWS provider for Secrets Store CSI calls Secrets Manager.
 4. The driver mounts the value as /mnt/secrets-store/api-key.
 5. The gateway reads the file and strips surrounding whitespace.
@@ -526,8 +528,9 @@ The Kubernetes readiness probe and ALB health check both use `/ready`.
 
 [The gateway manifest](../k8s/aws/gateway.yaml) defines:
 
-- Two initial replicas.
-- Placement on `nodepool=system-gateway`.
+- One initial replica in the low-cost demo. Two replicas are the production
+  shaped target after a second worker is available.
+- Placement on `nodepool=m7i-inference` in the current CPU-only demo.
 - A mounted Secrets Store CSI volume.
 - CPU request `250m` and memory request `256Mi`.
 - CPU limit `1` and memory limit `1Gi`.
@@ -550,9 +553,9 @@ Each template defines:
   `inference=openvino-cpu`.
 - An S3 synchronization init container.
 - OpenVINO Model Server targeting `CPU`.
-- A `2` GiB cache setting.
-- CPU request `4`, memory request `12Gi`.
-- CPU limit `8`, memory limit `24Gi`.
+- A `1` GiB cache setting.
+- CPU request `2`, memory request `6Gi`.
+- CPU limit `3`, memory limit `12Gi`.
 - A `20Gi` `ReadWriteOnce` volume claim.
 - Startup, readiness, and liveness probes on `/v1/config`.
 
@@ -774,8 +777,8 @@ separates identities by responsibility:
 | --- | --- | --- |
 | EKS cluster role | `eks.amazonaws.com` | Allow the managed control plane to manage required AWS resources |
 | Node role | `ec2.amazonaws.com` | Allow kubelet/node bootstrap and ECR image pulls |
-| EBS CSI role | EKS OIDC service account | Provision and attach EBS volumes |
-| ALB controller role | `kube-system:aws-load-balancer-controller` | Manage ALB-related AWS resources |
+| EBS CSI role | EKS Pod Identity | Provision and attach EBS volumes |
+| ALB controller role | EKS Pod Identity | Manage ALB-related AWS resources |
 | Gateway role | `llm-inference:llm-gateway` | Read one Secrets Manager secret |
 | OVMS model-reader role | `llm-inference:ovms-model-reader` | List and read model objects from one S3 bucket |
 
@@ -783,24 +786,27 @@ Compromise of the gateway pod should not grant model-bucket administration or
 load-balancer permissions. Compromise of an OVMS pod should not reveal the
 gateway API key.
 
-### IRSA
+### EKS Pod Identity And IRSA
 
-IAM Roles for Service Accounts (IRSA) connects:
+The deployed AWS design used EKS Pod Identity. The equivalent identity flow is:
 
 ```text
 Kubernetes service account
-        -> EKS OIDC identity token
-        -> IAM role trust policy
+        -> EKS Pod Identity association
+        -> pods.eks.amazonaws.com trust policy
         -> short-lived STS credentials
         -> permitted AWS API
 ```
 
-The IAM trust policy limits which namespace and service account may assume the
-role. The permission policy limits the AWS operations and resources.
+The association limits the namespace and service account. The IAM permission
+policy limits the AWS operations and resources. The EBS CSI add-on,
+`llm-gateway`, `ovms-model-reader`, and AWS Load Balancer Controller each use a
+separate role association in the AWS design.
 
-IRSA is preferable to placing S3 and Secrets Manager permissions on the node
-role. A node role is shared by every pod that can reach node metadata; a
-workload role follows the specific pod identity.
+IRSA is the older OIDC-based alternative and is still worth understanding for
+interviews. Both approaches are preferable to placing S3 and Secrets Manager
+permissions on the node role. A node role is shared by every pod that can use
+node credentials; a workload role follows the specific service account.
 
 ### Secret Handling
 
@@ -890,11 +896,11 @@ outage while still removing the gateway from traffic.
 
 ### Resource Management
 
-The OVMS pod requests 4 CPU and 12 GiB memory and limits at 8 CPU and 24 GiB.
-The request determines scheduling. A nominal 4-vCPU node is usually too small
-because Kubernetes reserves some CPU for the operating system and node
-services. The Terraform inference type `m7i.2xlarge` provides room for the
-request and platform overhead.
+The current POC OVMS pod requests 2 CPU and 6 GiB memory and limits at 3 CPU
+and 12 GiB. The request determines scheduling. A nominal 4-vCPU node is tight
+because Kubernetes reserves CPU and memory for the operating system and node
+services. The low-cost demo used one `m7i.xlarge`; a larger production-shaped
+profile should use a larger worker and spare capacity.
 
 Resource sizing must include:
 
@@ -910,15 +916,16 @@ Resource sizing must include:
 [The HPA](../k8s/aws/hpa.yaml) targets the gateway Deployment:
 
 ```text
-Minimum replicas: 2
-Maximum replicas: 4
+Minimum replicas: 1
+Maximum replicas: 2
 CPU target: 70 percent average utilization
 ```
 
 Metrics Server supplies resource metrics. This scales the stateless API layer,
 not OVMS. Inference autoscaling needs model-aware capacity, startup time, queue
 depth, concurrency, and cost controls; it is intentionally not presented as
-implemented here.
+implemented here. A `minReplicas: 0`, `maxReplicas: 1` setting was discussed as
+a theoretical cost-saving option, but it was not applied or load-tested.
 
 ### PodDisruptionBudgets
 
@@ -1151,7 +1158,7 @@ layers.
 | S3 model sync | No | No | No | Init container/IAM exist | Yes |
 | EBS model cache | No | Local storage | PVC tested locally | CSI/PVC definitions exist | Yes |
 | Secrets Manager CSI mount | No | No | No | Terraform/manifests exist | Yes |
-| IRSA | No | No | No | Roles and service accounts exist | Yes |
+| EKS Pod Identity | No | No | No | Roles and service accounts exist | Yes |
 | Argo CD reconciliation | No | No | No | Helm/Application definitions exist | Yes |
 | Gateway HPA | No | No | No | HPA/Metrics Server definitions exist | Yes |
 | Blue-green promotion | No | No | No | Blue/green definitions exist | Yes |
@@ -1310,9 +1317,8 @@ make the trust boundary reviewable.
 - The node role lets kubelet and node-level components join and operate.
 - Controller roles give the ALB and EBS CSI controllers only the AWS
   permissions they need.
-- Workload roles use IAM Roles for Service Accounts (IRSA): OVMS can read the
-  model prefix in S3, while the gateway can read only its Secrets Manager
-  secret.
+- Workload roles use EKS Pod Identity: OVMS can read the model prefix in S3,
+  while the gateway can read only its Secrets Manager secret.
 
 Node access is therefore not treated as permission for every workload on that
 node.
@@ -1332,8 +1338,10 @@ failure.
 
 ### What Does The HPA Scale?
 
-The Horizontal Pod Autoscaler (HPA) scales gateway replicas from two to four
-based on CPU utilization reported by Metrics Server. It does not scale OVMS.
+The Horizontal Pod Autoscaler (HPA) scales the gateway from one to two
+replicas based on CPU utilization reported by Metrics Server. It does not
+scale OVMS. A theoretical zero-to-one configuration was discussed for cost
+control but was not applied or load-tested.
 
 Inference scaling needs model-aware signals such as queue depth, concurrent
 requests, token throughput, latency, and memory or key-value cache pressure.
@@ -1371,7 +1379,7 @@ The main gaps are live AWS validation, measured capacity, transport and user
 identity security, deeper observability, model-aware scaling, failure testing,
 and automated promotion controls.
 
-Specifically, the ALB, IRSA sessions, Secrets Store CSI mount, S3 model sync,
+Specifically, the ALB, Pod Identity sessions, Secrets Store CSI mount, S3 model sync,
 EBS attachment behavior, Argo CD reconciliation, HPA response, node drains,
 Availability Zone failure, and AWS performance require live environment
 testing. Transport Layer Security (TLS), corporate authentication, rate
@@ -1445,8 +1453,8 @@ publicly.
 private subnets, selected an internal ALB, and retained NAT only for bootstrap
 or uncovered destinations. I added an S3 gateway endpoint and interface
 endpoints for core AWS APIs, with private DNS and endpoint security groups. I
-used IRSA to separate S3 and Secrets Manager permissions, Secrets Store CSI to
-mount the gateway key as a file, EBS for per-pod model cache, and Argo CD plus
+used EKS Pod Identity to separate S3 and Secrets Manager permissions, Secrets
+Store CSI to mount the gateway key as a file, EBS for per-pod model cache, and Argo CD plus
 blue-green manifests for controlled deployment.
 
 **Result:** The repository now contains a coherent private EKS implementation
@@ -1509,10 +1517,1075 @@ Do not say:
 - Can I explain why interface endpoints need security groups but no special
   route-table entry?
 - Can I explain cluster, node, controller, and workload IAM roles separately?
-- Can I explain IRSA without saying credentials are stored in the pod?
+- Can I explain EKS Pod Identity and contrast it with IRSA without saying
+  long-lived credentials are stored in the pod?
 - Can I explain why S3 and EBS are both used?
 - Can I explain startup, readiness, and liveness probes?
 - Can I explain why gateway HPA does not scale inference?
 - Can I explain the blue-green promotion and rollback sequence?
 - Can I describe the benchmark environment accurately?
 - Can I state what still needs live AWS validation?
+
+## Appendix: Complete Project Execution Record
+
+This appendix is the chronological record of the work, the failures that were
+encountered, what each failure meant, and how to describe it in an interview.
+It is deliberately more concrete than the architecture summary.
+
+### Current Truth
+
+The project has three validated layers and one implemented-but-rebuildable AWS
+layer:
+
+1. Docker and OVMS serving were validated locally on Windows.
+2. Minikube was used to learn single-node Kubernetes and Service exposure.
+3. A two-node k3s cluster on lightweight Ubuntu VMs was used to learn worker
+   scheduling, storage, capacity, and CPU compatibility.
+4. The AWS EKS design, manifests, Terraform roots, and deployment scripts are
+   present locally. The AWS learning environment was created and exercised,
+   then deleted. The current AWS environment is not running.
+
+The AWS environment was initially created mainly through the AWS console and
+CLI. Terraform adoption plans were generated and reviewed, but the adoption
+plan was not applied. Therefore the accurate statement is:
+
+> I implemented and validated Terraform plans for the AWS architecture; the
+> next clean run will create the environment from Terraform.
+
+Do not say that Terraform already provisioned the deleted AWS environment.
+That would overstate the work.
+
+### Phase 0: Requirements And Design Decisions
+
+The initial problem was to serve an open-source LLM on Intel-oriented
+infrastructure and make it an operable service rather than a process started
+manually on one machine.
+
+The design separated responsibilities:
+
+| Component | Responsibility |
+| --- | --- |
+| OpenVINO | Optimized Intel inference runtime |
+| OVMS | Network-serving layer around OpenVINO |
+| FastAPI gateway | Authentication, validation, stable client API, routing |
+| Kubernetes | Scheduling, probes, Services, storage, restarts, rollout |
+| S3 | Durable model artifact source |
+| EBS | Per-pod writable model cache |
+| Secrets Manager | API key storage |
+| Secrets Store CSI | Mounts the key into the gateway as a file |
+| Internal ALB | Private client entry point |
+| EKS Pod Identity | Per-workload AWS permissions |
+
+The end user sends a prompt to the gateway. The end user does not contact
+OVMS, Kubernetes, S3, EBS, or the AWS control plane directly.
+
+The first target was Intel CPU inference because it was available locally and
+on AWS M7i instances. Intel GPU and NPU execution were kept as a future node
+pool and device-plugin path; they were not validated in this project.
+
+### Phase 1: Running OVMS In Docker On Windows
+
+The first milestone was to prove that the model and serving runtime worked
+without Kubernetes.
+
+The container exposed REST on `localhost:8000`. The useful first check was:
+
+```powershell
+curl.exe http://localhost:8000/v1/config
+```
+
+PowerShell detail: `curl` can resolve to the `Invoke-WebRequest` alias. That
+produces a PowerShell object and can display a script-parsing warning. Use
+`curl.exe` for real curl behavior or use `Invoke-RestMethod` when a parsed JSON
+object is desired.
+
+#### First Docker issue: empty model configuration
+
+`/v1/config` initially returned `{}`. The REST server was healthy, but the
+model was not ready. Container logs showed Git LFS downloading a multi-gigabyte
+`openvino_model.bin` and the detokenizer files.
+
+The lesson was to distinguish:
+
+- Process readiness: port 8000 is listening.
+- Model readiness: the requested model reports `AVAILABLE`.
+
+#### Second Docker issue: MediaPipe graph not found
+
+Calling `/v3/chat/completions` before model initialization produced:
+
+```text
+Mediapipe graph definition with requested name is not found
+```
+
+This was a timing and readiness problem, not an invalid chat request. The
+correct gate was the model status in `/v1/config`:
+
+```json
+{
+  "OpenVINO/Phi-3.5-mini-instruct-int4-ov": {
+    "model_version_status": [
+      {
+        "version": "1",
+        "state": "AVAILABLE",
+        "status": {"error_code": "OK", "error_message": "OK"}
+      }
+    ]
+  }
+}
+```
+
+Only after this state was reached did chat completion return a valid answer,
+model name, and token usage. This led to the readiness design used later in
+Kubernetes.
+
+#### Docker result
+
+The local container proved that:
+
+- The OVMS image could run on the laptop CPU.
+- The OpenVINO model could download and initialize.
+- REST chat serving worked.
+- A listening port was not sufficient evidence of inference readiness.
+
+### Phase 2: Minikube On The Laptop
+
+Minikube was the first Kubernetes step. It provided a single-node cluster
+inside the laptop so that Kubernetes concepts could be learned without cloud
+cost.
+
+The workload used a Deployment, a Service, resource requests and limits, and
+HTTP probes against `/v1/config`.
+
+#### Minikube API server failure
+
+One startup attempt failed with messages such as:
+
+```text
+K8S_APISERVER_MISSING
+apiserver process never appeared
+connect: connection refused to localhost:8443
+```
+
+The storage-class and storage-provisioner add-ons also failed because the API
+server was not available. This was a cluster bootstrap problem, not an OVMS
+problem. The correct debugging order was `minikube status`, cluster logs,
+driver state, and a clean restart before debugging application manifests.
+
+#### Invalid image tag
+
+The pod entered `ErrImagePull` and `ImagePullBackOff` because the manifest used:
+
+```text
+openvino/model_server:2025.4-py
+```
+
+The registry returned `manifest unknown`. Kubernetes events showed the exact
+reason. The fix was to use an image tag that actually existed, and the AWS
+manifests later moved toward digest-pinned images to avoid mutable-tag
+ambiguity.
+
+#### Dynamic Minikube service URL
+
+With the Docker driver on Windows, this command returned a temporary URL:
+
+```powershell
+minikube service ovms-llm-service --url
+```
+
+The URL changed when the tunnel was recreated. The terminal running the
+Minikube tunnel had to remain open. Reusing an older port caused:
+
+```text
+Unable to connect to the remote server
+```
+
+The Kubernetes Service and pod could be healthy while the client was still
+using a dead tunnel URL.
+
+#### Local benchmark result
+
+After using the current tunnel URL, five requests succeeded:
+
+| Measurement | Result |
+| --- | ---: |
+| Average latency | 2.469 seconds |
+| Average completion throughput | 16.69 tokens/second |
+| First request | 5.023 seconds |
+| Later requests | Approximately 1.8 seconds |
+
+The first request was slower because of runtime warm-up. These numbers are
+local laptop measurements, not AWS or bare-metal performance numbers.
+
+### Phase 3: Two-Node k3s Cluster On Ubuntu VMs
+
+The next goal was to simulate separate bare-metal machines without buying
+multiple physical systems.
+
+The architecture was:
+
+```text
+Ubuntu VM 1: k3s server/control plane
+        |
+        +-- private VM network -- Ubuntu VM 2: k3s worker
+                                      |
+                                      +-- OVMS inference pod
+```
+
+The two VMs used private addresses in the `192.168.88.0/24` range.
+
+#### Why two VMs?
+
+One VM taught Kubernetes syntax. Two VMs taught scheduling and node failure
+boundaries. It was still only a simulation of bare metal: the VMs shared the
+laptop's physical CPU and memory, and they did not provide a real Intel GPU or
+NPU device path.
+
+#### SSH connection refused
+
+An attempt to connect to the worker returned:
+
+```text
+ssh: connect to host 192.168.88.13 port 22: Connection refused
+```
+
+`192.168.x.x` is a private RFC 1918 address. The error meant the VM was
+reachable but no SSH service was accepting connections, or the VM firewall was
+rejecting the port. The fix path was to verify the VM was running, install or
+start `sshd`, allow TCP 22, and confirm the VM network adapter was on the
+expected private network.
+
+#### NodePort and empty endpoints
+
+The k3s version used a NodePort such as `worker-ip:30080`. NodePort is a stable
+port on nodes; it is not the same as a production cloud load balancer. A
+Service with no ready endpoints still cannot route traffic.
+
+The useful checks were:
+
+```text
+kubectl get pods -o wide
+kubectl describe pod <pod>
+kubectl get service <service>
+kubectl get endpoints <service>
+kubectl get events --sort-by=.lastTimestamp
+```
+
+An empty Endpoint object meant that the Service selector did not currently
+have a ready pod. The application could be listening inside a container while
+the Service correctly refused to route to it.
+
+#### PVC capacity could not be reduced
+
+Kubernetes rejected an attempt to reduce a PVC request below its existing
+capacity:
+
+```text
+spec.resources.requests.storage: Forbidden: field can not be less than status.capacity
+```
+
+A bound volume cannot be shrunk by editing the claim. The choices are to keep
+the existing size, create a new larger claim, or delete and recreate the
+volume when data can safely be discarded.
+
+#### Model memory failure
+
+The larger Phi-3 model caused the pod to enter `OOMKilled`. This was a real
+capacity failure, not a Kubernetes networking failure. The model, runtime,
+KV-cache behavior, and request concurrency all consume memory.
+
+The POC moved to the smaller:
+
+```text
+OpenVINO/Phi-3-mini-FastDraft-50M-int8-ov
+```
+
+It reached `AVAILABLE` and was a better fit for the VM.
+
+#### CPU instruction failure under virtualization
+
+The smaller model still produced an inference-time failure in the
+PagedAttention/BRGEMM path:
+
+```text
+cannot be executed due to invalid brgemm params
+```
+
+The pod could report ready while a real generation request still crashed. The
+logs showed that this was CPU execution compatibility under the virtualized
+CPU, not a Service problem.
+
+The workaround made the oneDNN instruction ceiling explicit:
+
+```text
+ONEDNN_MAX_CPU_ISA=AVX2
+DNNL_MAX_CPU_ISA=AVX2
+```
+
+This is useful for a constrained VM lab, but it is not proof of optimal
+hardware performance. On real Intel hardware, the supported driver, CPU
+features, OpenVINO version, model format, and target device still need to be
+benchmarked.
+
+#### Benchmark destabilized the pod
+
+The k3s benchmark could make the inference container fail even after a single
+smoke request worked. The corrected sequence was:
+
+1. Check model availability.
+2. Run one request.
+3. Watch restarts and logs.
+4. Run a small benchmark.
+5. Increase load only after the capacity limit is understood.
+
+The lesson was that readiness proves traffic eligibility, not safe throughput.
+
+### Phase 4: AWS Network Foundation
+
+The AWS design used one VPC in `ap-south-1` with two Availability Zones.
+
+The learning VPC values were:
+
+| Resource | Learning value |
+| --- | --- |
+| VPC | `10.0.0.0/16` |
+| Private subnet A | `10.0.128.0/20` in `ap-south-1a` |
+| Private subnet B | `10.0.144.0/20` in `ap-south-1b` |
+| Public subnet A | `10.0.0.0/20` in `ap-south-1a` |
+| Public subnet B | `10.0.16.0/20` in `ap-south-1b` |
+| Kubernetes Service CIDR | `172.20.0.0/16` |
+
+The private subnets hosted worker nodes. Public subnets hosted the Internet
+Gateway path and the single NAT Gateway used during bootstrap. A route table
+is associated with a subnet; a VPC itself is not directly attached to a route
+table in the way a subnet is.
+
+#### NAT Gateway versus VPC endpoints
+
+The design used both because they solve different problems:
+
+- NAT Gateway provides outbound access for destinations without a private VPC
+  endpoint. It is useful but carries hourly and data-processing cost.
+- The S3 gateway endpoint adds private S3 routes to a route table and does not
+  create an ENI or require an endpoint security group.
+- Interface endpoints create ENIs with private IPs in selected subnets. Private
+  DNS resolves normal AWS service hostnames to those private IPs.
+- Interface endpoints require a security group because they accept HTTPS
+  connections. They do not require a special endpoint route table because the
+  normal VPC local route reaches their private ENIs.
+
+The interface endpoints used for the POC included ECR API, ECR Docker, EC2,
+Secrets Manager, STS, CloudWatch Logs, CloudWatch Monitoring, and EKS Auth.
+They were placed in both private subnets for Availability Zone locality and
+survivability, at the cost of additional PrivateLink ENIs.
+
+#### AWS console concepts that caused confusion
+
+An EKS control plane is managed by AWS. It is not a pair of EC2 control-plane
+instances that the user creates and SSHs into. The user still creates or
+selects worker capacity through managed node groups, self-managed nodes, or
+EKS Auto Mode.
+
+Auto Mode is an AWS-managed way to provision and manage node capacity. It is
+not the same as the EKS control plane. Standard EKS with a managed node group
+was easier to reason about for this learning project because node type,
+labels, disk size, and scaling were explicit.
+
+The initial production-shaped design discussed separate platform and inference
+node groups. The low-cost AWS demo reduced this to one `m7i.xlarge` inference
+node because the account had a tight EC2 vCPU quota.
+
+### Phase 5: AWS Quota And Node-Group Problems
+
+#### Free Tier eligibility versus credits
+
+The console rejected an instance with:
+
+```text
+The specified instance type is not eligible for Free Tier
+```
+
+Account credits can offset eligible charges, but credits do not make an
+instance Free Tier eligible. A separate EC2 service quota can still block the
+launch.
+
+#### Eight-vCPU quota
+
+The node group also failed with:
+
+```text
+VcpuLimitExceeded
+current vCPU limit of 8
+```
+
+Two running `t3.medium` instances already consumed 4 vCPUs. An `m7i.xlarge`
+uses 4 vCPUs, so one inference node fits exactly under an 8-vCPU quota. Two
+`m7i.xlarge` workers would need 8 vCPUs by themselves and would exceed the
+quota once the existing instances were counted.
+
+The important interview distinction is:
+
+- EKS control-plane management does not mean EC2 control-plane instances are
+  consuming this node quota.
+- Worker instances and Auto Mode capacity do consume EC2 capacity and quotas.
+- Billing credits do not remove service-quota limits.
+
+#### Node group stuck in CREATING or DELETING
+
+The console showed a node group stuck in `CREATING` with no Auto Scaling Group
+listed yet. Manually deleting the Auto Scaling Group made the situation worse:
+EKS still owned the node-group operation and could become stuck trying to
+reconcile a resource that had been removed behind its back.
+
+The safe operational rule is to delete managed node groups through EKS, wait
+for the EKS operation to finish, and only then delete the cluster. Do not
+delete the backing Auto Scaling Group directly while EKS owns it.
+
+#### NodeCreationFailure: instance did not join
+
+One instance was running but EKS reported:
+
+```text
+NodeCreationFailure
+Instances failed to join the Kubernetes cluster
+```
+
+The node console output identified the root cause:
+
+```text
+EC2: DescribeInstances ... context deadline exceeded
+SSM Agent unable to acquire credentials ... ssm.ap-south-1.amazonaws.com ... i/o timeout
+```
+
+The instance had a private address and could not reach required AWS APIs. The
+fix was to verify private-subnet egress, NAT routes, interface endpoints,
+endpoint private DNS, endpoint security-group rules, and the node role. The
+EC2 and EKS Auth endpoints were especially important for the bootstrap path.
+
+The useful evidence chain was:
+
+```text
+aws eks describe-nodegroup
+aws ec2 describe-instances
+aws ec2 get-console-output
+kubectl get nodes
+kubectl get events -n kube-system
+```
+
+Once the network path was corrected, the node joined and became `Ready`.
+
+#### CoreDNS and Metrics Server showed Degraded
+
+The add-ons reported `InsufficientNumberOfReplicas` and `no nodes available to
+schedule pods`. This was expected while the node group had no joined worker.
+CoreDNS and Metrics Server pods were `Pending` with no node assigned.
+
+After the worker became `Ready`, both add-ons scheduled and reported `Running`.
+The lesson was to distinguish an add-on health symptom from the scheduling
+root cause.
+
+#### EBS CSI controller initially crashed
+
+The EBS CSI controller briefly showed `1/6`, `Error`, and `CrashLoopBackOff`.
+The node-side CSI pod was running. After the managed add-on and its Pod
+Identity association settled, the controller reached `6/6 Running`.
+
+The final storage checks were:
+
+```powershell
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-ebs-csi-driver
+kubectl get storageclass
+```
+
+The StorageClass needed to use `ebs.csi.aws.com` for EBS dynamic provisioning.
+
+### Phase 6: AWS Add-ons, Secrets, And Workload Identity
+
+The first Secrets Store CSI attempt used the upstream Helm chart. It created
+resources that later conflicted with the AWS-managed add-on:
+
+```text
+ConfigurationConflict
+ClusterRole ... metadata.labels.app.kubernetes.io/instance
+CSIDriver ... metadata.labels.app.kubernetes.io/instance
+```
+
+The clean ownership rule became: use one owner. For EKS, the AWS-managed
+`aws-secrets-store-csi-driver-provider` add-on is the preferred owner for the
+driver/provider components. Do not install the same components through Helm
+at the same time.
+
+The workload identities were separated:
+
+| Service account | AWS permission |
+| --- | --- |
+| `llm-gateway` | Read the one Secrets Manager API-key secret |
+| `ovms-model-reader` | List and read only the model prefix in S3 |
+| `aws-load-balancer-controller` | Manage the internal ALB resources |
+| `ebs-csi-controller-sa` | Provision and attach EBS volumes |
+
+An EKS Pod Identity association connects a namespace and service account to a
+role. The API key is not stored in Git, an image, or a normal ConfigMap. It is
+mounted by Secrets Store CSI at `/mnt/secrets-store/api-key`.
+
+### Phase 7: Artifact And Application Deployment
+
+The deployment order was intentionally dependency-driven.
+
+#### Model artifact
+
+The model was stored under:
+
+```text
+s3://<model-bucket>/OpenVINO/Phi-3.5-mini-instruct-int4-ov/
+```
+
+The OVMS StatefulSet uses an init container with the `ovms-model-reader`
+identity. The init container synchronizes the model from S3 into an EBS-backed
+PVC. OVMS then serves the local filesystem path.
+
+This avoids making every request dependent on S3 and gives OVMS the filesystem
+layout it expects. S3 is the durable source; EBS is the per-pod cache.
+
+#### Gateway image
+
+The gateway image was built locally and pushed to private ECR. The final
+deployment should use an immutable digest, not a mutable `latest` tag:
+
+```powershell
+$ACCOUNT_ID = aws sts get-caller-identity --query Account --output text
+$REGISTRY = "$ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com"
+
+aws ecr get-login-password --region ap-south-1 |
+  docker login --username AWS --password-stdin $REGISTRY
+
+docker build -t "$REGISTRY/openvino-llm-gateway:0.1.0" .\gateway
+docker push "$REGISTRY/openvino-llm-gateway:0.1.0"
+```
+
+After the push, query the digest and place that digest in the Terraform input
+or rendered manifest. This prevents a tag from silently changing the runtime.
+
+#### Kubernetes application order
+
+The reliable order was:
+
+1. Create the cluster and wait for the worker to be `Ready`.
+2. Confirm CoreDNS, VPC CNI, Pod Identity, Metrics Server, EBS CSI, and
+   Secrets Store CSI are healthy.
+3. Apply the `gp3` StorageClass and namespace.
+4. Apply gateway configuration.
+5. Apply blue and green OVMS StatefulSets.
+6. Apply the SecretProviderClass and gateway Deployment/Service.
+7. Apply HPA, PDB, and finally the Ingress after the controller and ALB
+   security group are ready.
+8. Wait for OVMS `/v1/config` to report `AVAILABLE`.
+9. Run one direct smoke request before benchmarking.
+10. Test the internal ALB from the private network.
+
+The renderer at `scripts/render-aws-manifests.ps1` fills account-specific
+Terraform outputs such as the ECR image reference, S3 bucket, model prefix,
+secret name, AWS region, and ALB security-group ID. It writes to an ignored
+directory and leaves source manifests unchanged.
+
+### Phase 8: AWS Request Path And Validation
+
+The final request path is:
+
+```text
+Private client
+  -> internal AWS ALB
+  -> Kubernetes Ingress
+  -> gateway ClusterIP Service
+  -> FastAPI gateway pod
+  -> active OVMS ClusterIP Service
+  -> OVMS model on CPU
+```
+
+The ALB is the application load balancer. The EKS API endpoint is a separate
+control-plane endpoint and is not an application load balancer. The Kubernetes
+Service provides stable internal discovery; it does not replace the ALB.
+
+The validation sequence was:
+
+```powershell
+kubectl get nodes -o wide
+kubectl get pods -n kube-system -o wide
+kubectl get pods,pvc -n llm-inference
+kubectl get endpoints -n llm-inference
+kubectl logs -n llm-inference statefulset/ovms-blue -c sync-model
+kubectl logs -n llm-inference statefulset/ovms-blue -c ovms
+```
+
+Then:
+
+1. Check `/v1/config` inside the cluster.
+2. Port-forward the gateway for a direct smoke request.
+3. Run a small benchmark with a bounded run count.
+4. Check latency, token counts, restarts, and memory.
+5. Test the internal ALB only from a private path.
+
+The HPA was defined and discussed as a Kubernetes capability. A serious
+model-serving HPA test was not performed. For a reliable demo, `minReplicas: 1`
+is safer. A scale-to-zero HPA with `maxReplicas: 1` can produce cold starts and
+cannot reliably use ordinary CPU metrics when there are zero pods; true
+scale-to-zero normally needs an external metric or event-driven scaler.
+
+### Terraform: Adoption And Clean Rebuild
+
+The repository now has two Terraform roots:
+
+| Root | Owns |
+| --- | --- |
+| `terraform/aws` | VPC, subnets, routes, NAT, endpoints, EKS, node group, IAM, add-ons, ECR, S3, and secret metadata |
+| `terraform/platform` | AWS Load Balancer Controller Helm release |
+
+The adoption design was created because the first AWS environment was built
+manually. Its read-only plan showed:
+
+```text
+65 to import, 0 to add, 0 to change, 0 to destroy
+```
+
+The platform adoption plan showed:
+
+```text
+1 to import, 0 to add, 0 to change, 0 to destroy
+```
+
+Those plans were reviewed but not applied. After the AWS resources were
+deleted, the correct path is a clean build:
+
+```powershell
+adopt_existing = false
+```
+
+Do not reuse `adoption.tfvars.example`; it contains old resource IDs and
+`adopt_existing = true`.
+
+The clean-build workflow is:
+
+```powershell
+terraform -chdir=terraform/aws init -backend=false
+terraform -chdir=terraform/aws validate
+terraform -chdir=terraform/aws plan -var-file=clean.tfvars -out=clean.tfplan
+terraform -chdir=terraform/aws apply clean.tfplan
+```
+
+The plan should contain creates, zero imports, and zero destroys. Then obtain
+the new VPC ID, configure the platform Terraform root with
+`adopt_existing = false`, install the AWS Load Balancer Controller, push the
+new gateway image, recreate the secret value, upload the model, render the
+manifests, and deploy the Kubernetes application.
+
+Important clean-build boundaries:
+
+- Terraform creates the Secrets Manager secret container, not the secret value.
+  Keep the value out of Terraform state and create it separately.
+- Terraform creates the S3 bucket, not the model files.
+- Terraform creates the ECR repository, not the image. Build and push the
+  gateway after the repository exists.
+- The current AWS root reads the AWS Load Balancer Controller IAM policy as a
+  data source. Verify that policy exists or add it to the clean-build
+  bootstrap before applying.
+- EBS CSI requires a Pod Identity role with the EBS CSI policy. Supply or
+  create that role before relying on EBS PVC provisioning.
+- If the EKS API is public during laptop bootstrap, restrict the public CIDR
+  to the administrator's `/32` rather than `0.0.0.0/0`. Disable public access
+  after a VPN, Direct Connect path, or VPC-connected runner can reach the
+  private endpoint.
+
+Terraform uses local state in this POC. A future production version should use
+an encrypted remote backend with locking and a controlled state-access policy.
+
+### Cleanup And Cost Control
+
+The cost-heavy resources were EKS, EC2 worker nodes, NAT Gateway, interface
+endpoints, and the internal ALB. The cleanup order matters:
+
+1. Delete Kubernetes Ingress and workloads so the ALB controller can remove the
+   ALB.
+2. Delete managed node groups through EKS.
+3. Delete the EKS cluster.
+4. Delete the NAT Gateway and release its Elastic IP.
+5. Delete interface and gateway endpoints.
+6. Empty and delete the S3 bucket.
+7. Delete ECR images and repository.
+8. Delete the secret, using immediate deletion only when the name must be
+   reused right away.
+9. Delete the VPC only after dependent ENIs, subnets, route tables, and
+   security groups are gone.
+
+Do not delete a managed node group's backing Auto Scaling Group directly. Do
+not run `terraform destroy` against a manually created environment that has
+not been imported into the Terraform state. Once Terraform owns a clean-build
+environment, destroy the platform root first and the AWS root second, after
+emptying S3 and handling ECR images.
+
+### Troubleshooting Playbook Used Throughout
+
+The same diagnostic order worked across Docker, Minikube, k3s, and EKS:
+
+1. **Is the process or pod running?** Check container/pod state and restarts.
+2. **Why did it stop?** Check termination reason and previous logs.
+3. **Can it be scheduled?** Check node readiness, taints, selectors, requests,
+   limits, and events.
+4. **Can the Service route?** Check selectors, ready conditions, Endpoints, and
+   EndpointSlices.
+5. **Is the model ready?** Check `/v1/config` and OVMS initialization logs.
+6. **Can the client reach it?** Check port-forward, NodePort tunnel, ALB DNS,
+   security groups, routes, and private-network access.
+7. **Does one request work?** Run a smoke request before a benchmark.
+8. **Does load remain safe?** Watch memory, CPU, cache usage, latency, and
+   restart count while increasing load gradually.
+
+The following is the quick error map. The detailed interview-ready resolution
+strategy follows it. In every case, the useful structure is:
+
+```text
+symptom -> evidence collected -> root cause -> smallest safe fix -> validation
+```
+
+| Symptom | Meaning | Correct next check |
+| --- | --- | --- |
+| `Mediapipe graph ... not found` | Model graph not loaded yet | `/v1/config` and model logs |
+| `ErrImagePull` | Image tag or registry access problem | Pod events and image reference |
+| `ImagePullBackOff` | Kubelet is backing off repeated pulls | Original pull error |
+| `CrashLoopBackOff` | Process starts and exits repeatedly | Current and previous logs |
+| `Pending` | Scheduler cannot place the pod | Events, nodes, requests, selectors |
+| Empty Service endpoints | No ready pod matches the selector | Labels and readiness probe |
+| `OOMKilled` | Memory capacity was exceeded | Limits, model size, concurrency |
+| BRGEMM/PagedAttention error | CPU/runtime compatibility or execution issue | OVMS logs and CPU features |
+| CoreDNS degraded | Usually no schedulable worker | Add-on health plus node state |
+| NodeCreationFailure | Instance booted but did not join | nodeadm output, IAM, network |
+| PVC shrink forbidden | Bound volume cannot be reduced | Keep, replace, or recreate PVC |
+| Endpoint `ConfigurationConflict` | Two managers own one resource | Select one owner: Helm or add-on |
+
+### Resolution Strategies In Interview Language
+
+#### `Mediapipe graph definition ... not found`
+
+**What I checked:** I checked the OVMS container logs and queried
+`/v1/config`. The REST process was listening, but the model was still being
+downloaded and initialized. The logs showed Git LFS retrieving the large model
+files, while `/v1/config` was still `{}` or did not contain an `AVAILABLE`
+model.
+
+**Resolution strategy:** I did not treat an open port as model readiness. I
+waited for the model version to report `AVAILABLE`, then made the Kubernetes
+startup and readiness probes depend on `/v1/config`. The chat request was only
+tested after that condition was true.
+
+**Interview version:**
+
+> The graph-not-found response was caused by sending traffic before OVMS had
+> completed model initialization. I verified that from the logs and
+> `/v1/config`, then used model availability as the readiness gate instead of
+> merely checking whether port 8000 was open.
+
+#### `ErrImagePull` and `ImagePullBackOff`
+
+**What I checked:** I used `kubectl describe pod` and read the Events section
+instead of starting with application logs. The event identified the exact
+image reference and returned `manifest unknown` for
+`openvino/model_server:2025.4-py`.
+
+**Resolution strategy:** I replaced the invalid image reference with an
+available OVMS image. I then watched the pod transition from pulling to
+running and verified model availability. `ImagePullBackOff` was treated as a
+retry symptom; the original pull error was the useful diagnosis. For the AWS
+path I moved toward digest-pinned images so a tag could not silently change.
+
+**Interview version:**
+
+> I diagnosed the image pull failure from kubelet events. The image tag did not
+> exist in the registry, so changing application configuration would not have
+> helped. I corrected the image reference, verified the rollout, and used an
+> immutable digest in the AWS design.
+
+#### `CrashLoopBackOff`
+
+**What I checked:** I inspected the current and previous container logs,
+`kubectl describe pod`, the termination reason, restart count, resource limits,
+and the last cluster events. I separated an application crash, an OOM kill, a
+CPU/runtime failure, and a failed model initialization instead of treating all
+CrashLoopBackOff events as the same problem.
+
+**Resolution strategy:** I fixed the cause indicated by the evidence. That
+could mean correcting the model path, selecting a valid image, increasing
+available capacity, using a smaller model, or constraining CPU instructions in
+the VM lab. I then deleted or rolled the pod only after the configuration was
+correct and validated with one request.
+
+**Interview version:**
+
+> CrashLoopBackOff was only the controller's summary. I looked at the previous
+> container termination and logs to identify the real cause, fixed that cause,
+> and then used a single smoke request before applying benchmark load.
+
+#### `Pending`
+
+**What I checked:** I read the scheduling Events and compared the pod's
+`nodeSelector`, taints, CPU and memory requests, PVC state, and available node
+capacity. In the AWS cluster, CoreDNS and Metrics Server were Pending because
+there was no joined worker node.
+
+**Resolution strategy:** I fixed the scheduling prerequisite rather than
+editing the pod blindly. That meant making a worker `Ready`, correcting labels,
+choosing an instance with enough headroom, or resolving a PVC/storage
+dependency. After the worker joined, the system add-ons scheduled normally.
+
+**Interview version:**
+
+> I used the scheduler events to identify why the pod had no placement. The
+> root cause was missing usable node capacity, not a CoreDNS configuration
+> problem. Once the worker became Ready, the Pending system pods scheduled and
+> recovered without changing their manifests.
+
+#### Empty Service endpoints
+
+**What I checked:** I compared the Service selector with the pod labels and
+checked readiness state, Endpoints, and EndpointSlices. A pod can be running
+and listening while still be excluded from a Service because its readiness
+probe has not passed.
+
+**Resolution strategy:** I corrected label/selector mismatches and waited for
+the readiness check to pass. If the pod was not ready, I debugged the pod
+itself. I did not blame the Service or expose a new NodePort before proving
+that a ready endpoint existed.
+
+**Interview version:**
+
+> The Service had no endpoints because Kubernetes had no ready pod matching its
+> selector. I verified labels and readiness, fixed the underlying pod problem,
+> and confirmed the endpoint list before testing client connectivity.
+
+#### `OOMKilled`
+
+**What I checked:** I used the pod's last termination reason and compared the
+model size, runtime initialization, KV-cache behavior, request concurrency,
+memory request, memory limit, and node allocatable memory.
+
+**Resolution strategy:** I selected the smaller quantized FastDraft model for
+the constrained VM and kept explicit requests and limits. I treated simply
+raising a container limit as insufficient if the node did not have the
+capacity. On a real deployment I would size the node and concurrency from
+measured model memory and throughput, not from the model file size alone.
+
+**Interview version:**
+
+> OOMKilled showed that the model workload exceeded available memory. I
+> separated model weights from runtime and cache overhead, selected a smaller
+> model for the lab, and would use measured concurrency and KV-cache behavior
+> to size production nodes.
+
+#### BRGEMM or PagedAttention execution failure
+
+**What I checked:** The model reached `AVAILABLE`, so I separated model
+loading from request execution. The OVMS logs pointed to an Intel CPU
+BRGEMM/PagedAttention initialization failure under the virtual CPU.
+
+**Resolution strategy:** I constrained oneDNN to AVX2 in the VM lab using
+`ONEDNN_MAX_CPU_ISA=AVX2` and `DNNL_MAX_CPU_ISA=AVX2`. That made the lab
+environment stable enough for the small model. I treated it as a virtualization
+and CPU-runtime compatibility workaround, not as proof that the same setting
+is optimal on physical Intel hardware.
+
+**Interview version:**
+
+> The server was ready but inference still failed, so I did not continue
+> debugging Kubernetes networking. The stack trace identified a CPU kernel
+> compatibility issue under virtualization. I constrained oneDNN to AVX2 for
+> the lab and would validate the native instruction set and OpenVINO runtime on
+> production Intel hardware.
+
+#### CoreDNS or Metrics Server `DEGRADED`
+
+**What I checked:** I queried the add-on health, listed the pods in
+`kube-system`, and read events. The add-on message said all replicas were
+unscheduled because no nodes were available.
+
+**Resolution strategy:** I fixed the worker node group and network bootstrap
+first. Once a node joined and became `Ready`, CoreDNS and Metrics Server
+scheduled and became healthy. The add-on status was a symptom of missing
+capacity, not evidence that both add-ons needed to be reinstalled.
+
+**Interview version:**
+
+> CoreDNS and Metrics Server were degraded because their pods had nowhere to
+> schedule. I traced the condition back to the failed worker join, repaired
+> node bootstrap, and confirmed the add-ons recovered after the node became
+> Ready.
+
+#### `NodeCreationFailure`
+
+**What I checked:** I compared the EKS node-group health, EC2 instance state,
+instance security group, private IP, node console output, and the EKS access
+entry. The node console showed `nodeadm` timing out on EC2 `DescribeInstances`
+and the SSM agent timing out to the regional SSM endpoint.
+
+**Resolution strategy:** I repaired the private-subnet network path: route
+tables, NAT or required interface endpoints, private DNS, endpoint security
+groups, node IAM permissions, and EKS Auth reachability. I did not recreate
+Kubernetes objects because the failure occurred before the node could join.
+After the network path was available, the same node bootstrap completed and
+`kubectl get nodes` showed `Ready`.
+
+**Interview version:**
+
+> The EC2 instance was running, but the node had not joined Kubernetes. The
+> nodeadm console output showed AWS API timeouts, so I traced the issue through
+> private-subnet routing, endpoints, security groups, and node IAM. The fix was
+> network/bootstrap access, not a Kubernetes Deployment change.
+
+#### PVC shrink forbidden
+
+**What I checked:** I compared the requested PVC size with the bound volume's
+`status.capacity` and checked whether the data could be discarded.
+
+**Resolution strategy:** Kubernetes does not shrink a bound volume by lowering
+the request. I kept the existing claim, increased it when necessary, or
+created a replacement claim when the cache was disposable. For a model cache,
+recreation is often acceptable; for persistent application data it requires a
+backup and migration plan.
+
+**Interview version:**
+
+> The PVC error was a storage lifecycle constraint: the claim was already
+> bound at a larger capacity. I did not force-edit it downward. I either kept
+> the capacity or recreated the disposable model cache with the intended size.
+
+#### `ConfigurationConflict` between Helm and an EKS add-on
+
+**What I checked:** I identified which resources already had Helm ownership
+labels and compared them with the AWS-managed add-on resources. The conflict
+was caused by two deployment managers trying to own the same ClusterRoles,
+bindings, CSIDriver, and CRDs.
+
+**Resolution strategy:** I selected one owner. For the AWS deployment I used
+the EKS-managed Secrets Store CSI provider add-on and removed the self-managed
+Helm ownership rather than applying both. I then verified the add-on status,
+CSI driver, CRD, and running pods.
+
+**Interview version:**
+
+> The conflict was an ownership problem, not a permissions problem. Helm and
+> the AWS-managed add-on were managing the same Kubernetes objects. I chose one
+> owner, removed the competing installation, and verified the resulting
+> driver and provider pods.
+
+### Additional Incidents Worth Mentioning
+
+#### `K8S_APISERVER_MISSING` in Minikube
+
+The Minikube storage add-ons failed with connection refused to `localhost:8443`
+because the API server process never appeared. I treated this as a cluster
+bootstrap failure, checked Minikube status and driver logs, and restarted or
+recreated the local cluster before applying workloads. The interview lesson
+is to verify the control plane before debugging application YAML.
+
+#### `Unable to connect to the remote server` from Minikube
+
+The pod was healthy, but the client used an old dynamic tunnel port returned by
+`minikube service --url`. I regenerated the URL and kept the tunnel terminal
+open. The interview lesson is to separate the Kubernetes Service from the
+local exposure mechanism.
+
+#### `VcpuLimitExceeded` and Free Tier errors
+
+The EC2 launch failed first because the selected instance was not Free Tier
+eligible and later because the Standard instance bucket had an 8-vCPU limit.
+I checked existing EC2 usage, counted the vCPUs required by the node group, and
+reduced the demo to one `m7i.xlarge`. Credits could offset cost but could not
+override the quota. The interview lesson is to check both pricing eligibility
+and service quotas before choosing a node type.
+
+#### Node group stuck after manual Auto Scaling Group deletion
+
+The backing Auto Scaling Group was deleted directly while EKS still believed it
+owned the node group. I learned to use EKS for managed node-group lifecycle and
+to wait for the EKS operation rather than deleting a dependent AWS resource
+behind its back. This is a useful example of respecting the control plane's
+ownership boundary.
+
+#### Benchmark caused a healthy inference pod to fail
+
+I first proved the request path with one smoke request, then watched logs,
+memory, restarts, and OVMS cache usage while increasing the run count. The
+benchmark exposed capacity and runtime limits that readiness did not. The
+interview lesson is that functional validation and performance validation are
+different test classes.
+
+### Interview Answers To Rehearse
+
+#### What did you actually build?
+
+I built a layered inference platform. OVMS executes an OpenVINO-optimized
+model, a FastAPI gateway provides the client contract and authentication, and
+Kubernetes manages placement, health, storage, and recovery. I validated the
+serving path locally through Docker, Minikube, and k3s, then implemented the
+private AWS EKS architecture with Terraform, managed add-ons, EKS Pod Identity,
+S3, EBS, Secrets Manager, ECR, and an internal ALB. The AWS environment was
+later deleted, so the next run is a Terraform clean build rather than a claim
+of an always-running production service.
+
+#### Why did you not expose OVMS directly?
+
+The gateway is the trust and policy boundary. It validates the API key and
+request shape, hides the blue/green backend choice, translates upstream
+failures, and gives clients a stable API. OVMS remains an internal model
+server, not the public application boundary.
+
+#### What did the hardest failure teach you?
+
+A pod being `Running` or a port being open does not prove inference works. The
+project had to distinguish image availability, model availability, Service
+readiness, node capacity, and actual request execution. The most useful
+diagnosis came from combining events, logs, endpoint state, resource status,
+and a single smoke request.
+
+#### Why are S3 and EBS both present?
+
+S3 is the durable, centrally managed source of model artifacts. EBS provides a
+writable, low-latency local cache for the OVMS pod. The init container copies
+from S3 to EBS before OVMS starts. This improves runtime behavior but introduces
+Availability Zone and ReadWriteOnce recovery considerations.
+
+#### Why did you choose Pod Identity?
+
+It maps a Kubernetes service account to a dedicated IAM role without putting
+long-lived credentials in the pod or granting every workload the node role.
+Gateway, OVMS, the ALB controller, and EBS CSI each receive separate AWS
+permissions. IRSA is the OIDC-based alternative and is also important to know,
+but the current AWS design uses Pod Identity.
+
+#### Did you validate GPU or NPU inference?
+
+No. The project validates Intel CPU inference. A GPU/NPU version would require
+the host driver stack, a supported Intel device plugin, node labels/taints,
+resource requests, container device access, the correct OVMS target device,
+and hardware-specific performance tests.
+
+#### Did you solve KV-cache sizing?
+
+No. The POC set conservative resource limits and observed OVMS cache logs, but
+production capacity still requires model-specific measurements of context
+length, concurrency, batch size, KV-cache usage, memory, latency, and
+throughput. Kubernetes cannot infer a safe model-serving capacity from a CPU
+request alone.
+
+#### Why is the HPA not enough for OVMS?
+
+The HPA is useful for the stateless gateway, where CPU utilization is a rough
+signal. Inference capacity is better described by queue depth, concurrent
+requests, token throughput, latency, and model memory. Scaling OVMS also has
+startup, model-download, EBS, and hardware-capacity costs. The POC keeps OVMS
+replica changes explicit through blue-green promotion.
+
+#### What remains before production?
+
+The next work is a real Terraform clean build, private-only EKS API access
+from the Intel DMZ/VPN, TLS and corporate identity, complete metrics/logs/
+traces, model-aware scaling, image and model promotion, NetworkPolicies,
+backup/restore, node-drain and Availability Zone failure testing, and measured
+capacity on the target Intel hardware.

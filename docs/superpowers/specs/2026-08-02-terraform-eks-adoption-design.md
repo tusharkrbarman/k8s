@@ -67,19 +67,23 @@ The first adoption profile must match the current environment:
 - EKS version: `1.36`
 - VPC: `vpc-09f5d3038235fc21d`
 - VPC CIDR: `10.0.0.0/16`
+- Cluster role: `openvino-llm-poc-cluster-role`
 - Private subnets:
   - `subnet-002bad3d9e2407605`
   - `subnet-0aefcc64a75b1dab2`
-- Current node group: `m7i-inference-node`
+- Current node group: `m7i-inference`
 - Current instance type: `m7i.xlarge`
 - Current node count: minimum, desired, and maximum of `1`
+- Current node disk: `100 GiB`
 - Current node labels:
   - `nodepool=m7i-inference`
   - `inference=openvino-cpu`
   - `hardware=intel-cpu`
 - Model bucket: `openvino-llm-models-654158184275-ap-south-1`
-- Model prefix: `OpenVINO/Phi-3-mini-instruct-int4-ov`
+- Model prefix: `OpenVINO/Phi-3.5-mini-instruct-int4-ov`
 - Existing internal ALB security group: `sg-0b68c332fe030f72c`
+- Existing private/main route table: `rtb-04fbbaf40f4c576d3`
+- Existing public route table: `rtb-04eda5e02cfcc8b82`
 
 The EKS API currently has both private and public access. Adoption must preserve that setting initially so Terraform does not make an unplanned connectivity change. Public access will be restricted or disabled in a separate hardening change after a VPN or other private route to the API is available.
 
@@ -92,7 +96,7 @@ The target networking shape is:
 - Two private subnets in separate Availability Zones.
 - One NAT gateway for bootstrap and any services without private endpoints.
 - S3 gateway endpoint.
-- Interface endpoints for ECR API, ECR Docker, STS, Secrets Manager, CloudWatch Logs, CloudWatch Monitoring, and EKS Auth when required by the private-only profile.
+- Interface endpoints for ECR API, ECR Docker, EC2, STS, Secrets Manager, CloudWatch Logs, CloudWatch Monitoring, and EKS Auth when required by the private-only profile.
 - Internal ALB security group restricted to the approved private client CIDRs.
 
 The public API endpoint variable remains available for temporary laptop bootstrap. The secure profile sets public access to disabled once the DMZ VPN/private route is operational.
